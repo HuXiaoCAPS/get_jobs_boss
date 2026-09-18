@@ -158,48 +158,8 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 
 ## 是否跟随上游
 
-**结论：结构上跟随，但已主动偏离 —— 同步时以"重新删掉上游新增的其他平台"为主要工作量。**
-
-> 历史说明：本 fork 的 git 历史已清除本机路径等私有信息（重写了部分 commit hash）。
->
-> 但注意：**本 fork 与 upstream/main 没有共同祖先**。实测本地 11 个提交、上游 660 个，
-> `git merge-base main upstream/main` 无输出（退出码 1），`git merge upstream/main` 会直接报
-> `fatal: refusing to merge unrelated histories` —— **同步上游不能靠 merge/rebase**。
-> 本地最老的提交本来就没有父提交（快照式起头），并非这次清洗造成。可行做法见下面「建议的同步姿势」。
-
-**跟随的一面**（为的是方便对照上游改动）
-- 保留上游的目录结构、包名、类名（`BossService` / `BossConfig` / `BossController` / `PlaywrightManager` …）
-- 改上游文件时尽量小：优先**新增文件**（`worker/platform/**`、`ConfigFileService`、新前端页面），
-  少动上游原有文件
-- 数据库表结构与上游保持一致，只**加列**（`city_filter_mode` / `city_exclude` / `skip_delivered_company`
-  在启动时由 `initSchema()` 自动补）
-
-**偏离的一面**（同步时的预期冲突）
-- **上游新增的平台文件会被"复活"**：同步后需要重新删一遍（删除的文件上游仍在维护）
-- **`PlaywrightManager`**：上游是四平台交织，本 fork 只留 Boss —— 这块几乎必然要手工取舍，
-  建议以本 fork 为准，只挑上游在 Boss 分支上的修复
-- **`Boss` → `BossPlatform`** 改名 + 老投递流程删除：上游对 `Boss.java` 的任何改动都要手工搬
-- **前端整块重组**：上游的前端页面改动无法直接合并
-- 上游的 `BossConfig` 字段删改（本 fork 移除了 `expectedSalary` 的消费方）
-
-**建议的同步姿势**
-
-```bash
-# 一次性：把 origin 指到自己的 fork，上游加为 upstream
-git remote set-url origin https://github.com/HuXiaoCAPS/get_jobs_boss.git
-git remote add upstream https://github.com/loks666/get_jobs.git
-
-# 每次同步上游（⚠️ 不能 merge —— 两边无共同祖先，属 unrelated histories）
-git fetch upstream
-git log --oneline --since=2026-09-01 upstream/main   # 看上游最近改了什么
-git diff main upstream/main -- <文件路径>             # 单文件对照，手工搬需要的修复
-git cherry-pick <上游提交SHA>                       # cherry-pick 不要求共同祖先
-git checkout upstream/main -- <文件路径>            # 谨慎：会覆盖该文件的本地改动
-# 然后按上面的"预期冲突"逐项处理，重点是：
-#   1) 重新删掉 worker/{liepin,job51,zhilian} 与对应 Controller/Service/entity/mapper
-#   2) PlaywrightManager 只保留 Boss 分支
-#   3) 跑 compileJava + fake-delivery 验收（见下）
-```
+**不同步。** 本 fork 是独立历史，与上游没有共同祖先，合不了 —— `git merge upstream/main` 直接报
+`fatal: refusing to merge unrelated histories`。上游有需要的修复，手工挑即可。
 
 **验收方式**（没有单元测试，只能这样验）
 ```bash
