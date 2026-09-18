@@ -4,7 +4,7 @@ import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
 /**
- * 根路径跳转到环境配置页。
+ * 根路径跳转到配置中心（/boss）。
  *
  * 注意：这里不能用 next/navigation 的服务端 redirect()。
  * 本项目配了 output: 'export'（纯静态导出），服务端重定向没有运行时可执行，
@@ -16,14 +16,14 @@ export default function HomeRedirect() {
   const router = useRouter()
 
   useEffect(() => {
-    router.replace('/env-config')
+    router.replace('/boss')
   }, [router])
 
   return (
     <>
-      <meta httpEquiv="refresh" content="0; url=/env-config" />
+      <meta httpEquiv="refresh" content="0; url=/boss" />
       <noscript>
-        <a href="/env-config">进入管理页面</a>
+        <a href="/boss">进入管理页面</a>
       </noscript>
     </>
   )
