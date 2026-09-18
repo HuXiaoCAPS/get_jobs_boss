@@ -14,7 +14,7 @@ CLAUDE.md
 .claude
 nul
 dist.zip
-db/
+db/*
 # Playwright
 .playwright/
 ms-playwright/
@@ -52,7 +52,11 @@ chromedriver
 *.jpg
 
 # Database files
-db/
+# 这里必须写 db/* 而不是目录级规则 db/：写成 db/ 时 git 不会进入该目录，
+# 下面的 !db/.gitkeep 会失效 —— 结果就是 .gitkeep 推不上去，新人 clone 后没有
+# db/ 目录，而 SQLite 不会自动建目录，jdbc:sqlite:./db/getjobs.db 会直接连不上库。
+db/*
+!db/.gitkeep
 *.db
 
 # Frontend build output
@@ -71,3 +75,33 @@ config/boss.yaml
 
 # 改造过程中的临时备份与一次性脚本（本地）
 .obsolete/
+
+# ============================================================
+# 隐私与本地产物（审计补漏）
+# ============================================================
+
+# 内部改造笔记：含本机绝对路径（项目根、JDK 安装目录等），只留本地、不进仓库
+# 与改造思路，只留本地，不进仓库
+PLAN.md
+
+# 运行日志：含 HR 姓名、公司、岗位等投递记录，不要外传
+# （target/ 已覆盖 target/logs/，这里兜住散落在别处的日志）
+*.log
+logs/
+
+# 打包 / 压缩 / 表格产物：源码仓库不需要，避免把「包」推上去
+*.zip
+*.xlsx
+*.tar
+*.tar.gz
+
+# 环境变量文件（含密钥）
+.env
+.env.*
+!.env.example
+
+# 编辑器 / 工具留下的本地副本
+*.local
+*.bak
+*.orig
+*.rej

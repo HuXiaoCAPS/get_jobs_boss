@@ -1,7 +1,7 @@
 # FORK.md — 本 fork 的说明
 
 > 本文件说明**这个 fork 相对上游做了什么、后续打算做什么、以及怎么跟上上游**。
-> 面向"clone 下来要用/要改"的人。内部工作笔记见 [PLAN.md](./PLAN.md)。
+> 面向"clone 下来要用/要改"的人。内部工作笔记（`PLAN.md`）含本机路径，只留在本地、不随仓库发布。
 
 ---
 
@@ -15,7 +15,7 @@
 > 或者需要开箱即用的图形界面，请直接用[上游](https://github.com/loks666/get_jobs)。
 > 协议沿用上游的 **PolyForm Noncommercial 1.0.0**（允许非商业使用，禁止商业使用）。
 
-- 本 fork 仓库：`<待填：你的 fork 地址>`
+- 本 fork 仓库：https://github.com/HuXiaoCAPS/get_jobs_boss
 - 上游仓库：https://github.com/loks666/get_jobs
 
 ---
@@ -128,7 +128,7 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 | 页面 | 内容 |
 |---|---|
 | `/deliver` 投递 | 左列平台（来自 `GET /api/platforms`）、右侧开始/停止 + 当次上限、SSE 实时进度 |
-| `/boss` 配置 | 单页配置中心：搜索条件 / 投递行为 / AI 提示词与我的资料 / 通知 / 黑名单 |
+| `/boss` 配置 | 单页配置中心：搜索条件 / 投递行为 / AI 提示词与我的资料 / 通知 / 黑名单 / **过滤规则（JD）** |
 | `/data` 数据 | KPI + 筛选条 + 分页表格（复用 `/api/boss/list` + `/api/boss/stats`） |
 | `/appearance` 外观 | 主题、每页条数、表格密度（存 localStorage） |
 
@@ -143,15 +143,25 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 - **停止反馈**：状态里新增 `stopping`，按钮变「正在停止…」，不再像卡死
 - **多值字段兼容全角逗号**（`，`）、顿号、中文分号 —— 手打配置时很容易踩
 - **管理页浏览器可选**：`manage_page.browser`（`msedge` / `default` / 可执行文件路径 / `none`）
-- **`jd-rules.txt` 规则过滤**：`[reject|require|warn] 名称 阈值` 多列表，匹配文本 = 岗位名 + JD 正文 + showSkills
-- **API 形状**：新增 `/api/platforms`（列表）、`/api/platforms/{id}/{start,stop,status,stream}`；
-  上游的 `/api/boss/*` 保留为兼容层，底层也走同一套任务壳
+- **`jd-rules.txt` 规则过滤**：`[reject|require|warn] 名称 阈值` 多列表，匹配文本 = 岗位名 + JD 正文 + showSkills；
+  可在「配置 → 过滤规则」里**直接编辑**（原文进出、不吞注释，保存后回显解析出的规则组与语法告警），
+  改完下一次点「开始投递」即生效，不需要重启
+- **遗留数据清理**：启动时幂等删掉上游多平台时代留下的 9 张空表（`job51_*` / `liepin_*` / `zhilian_*`）
+  与 `cookie` 表里 3 行遗留记录 —— 免得后来的人猜"哪个表还有用"
+- **死代码清理**：`BossIndustry` 三件套（数据库里根本没有这张表，一调就 SQLException）、
+  `/api/boss/execute`、`/api/boss/stream` 及配套的旧版 SSE 桥接（进度统一走 `/api/platforms/{id}/stream`）
+- **API 形状**：新增 `/api/platforms`（列表）、`/api/platforms/{id}/{start,stop,status,stream}`、
+  `/api/boss/jd-rules`（读写过滤规则）；`/api/boss/{start,stop,status,logout}` 保留为管理页兼容层
+  （登录态与退出登录是 Boss 特有的，平台无关层表达不了）
 
 ---
 
 ## 是否跟随上游
 
 **结论：结构上跟随，但已主动偏离 —— 同步时以"重新删掉上游新增的其他平台"为主要工作量。**
+
+> 历史说明：本 fork 的 git 历史里已清除本机路径等私有信息（重写了部分 commit hash）。
+> 上游那个提交未被改动，所以与上游的**共同祖先依然有效**，`git merge upstream/main` 照常可用。
 
 **跟随的一面**（为的是方便 merge）
 - 保留上游的目录结构、包名、类名（`BossService` / `BossConfig` / `BossController` / `PlaywrightManager` …）
@@ -172,7 +182,7 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 
 ```bash
 # 一次性：把 origin 指到自己的 fork，上游加为 upstream
-git remote set-url origin <你的 fork 地址>
+git remote set-url origin https://github.com/HuXiaoCAPS/get_jobs_boss.git
 git remote add upstream https://github.com/loks666/get_jobs.git
 
 # 每次同步上游
@@ -209,15 +219,17 @@ curl -X POST http://localhost:9527/api/dev/fake-delivery
 ### 计划中的功能
 
 - **数据页**：CSV 导出（导出当前筛选结果）、日期范围筛选、投递趋势
-- **`jd-rules.txt` 网页端编辑**：现在只能改文件
 - **加回平台**：抽象已就位，加平台 = 加一个包 + `@Component` + 一个 `DeliveryStore` 实现。
   真要做的话会先补 `FakePlatform` 那套验收再上真平台
+- **`boss_option` 字典的开箱可用**：城市 / 行业下拉的字典数据只存在于本地库，
+  新 clone 的人需要自备 `db/getjobs.db`（见「快速开始」），可以考虑做成种子文件或启动时拉取
 
 ### 计划中的清理（纯死代码，删了无副作用）
 
 - `dead_status`（`BossConfigEntity.deadStatus` / `BossConfig.deadStatus`）—— 消费方已删
-- 旧接口 `/api/boss/*`（`BossController`）—— 现为兼容层，前端已改走 `/api/platforms/*`；
-  删之前确认没有本地脚本/书签还在用
+
+> 已经做完的清理（`BossIndustry` 三件套、`/api/boss/execute`、`/api/boss/stream`）见上文
+> 「相对上游改了什么 → 7. 其它增强」。
 
 ---
 
@@ -226,10 +238,18 @@ curl -X POST http://localhost:9527/api/dev/fake-delivery
 与上游的差别只有"配置从哪来"和"页面在哪"，其余环境要求一致（**JDK 21**、Gradle、Node.js）。
 
 ```bash
-git clone <你的 fork 地址>
+git clone https://github.com/HuXiaoCAPS/get_jobs_boss.git
 cd get_jobs_boss
 
-# 1) 数据库：新用户按上游 README 从 release 下载 getjobs.db.template → 重命名为 getjobs.db → 放 db/
+# 0) JDK 21 若装在"非标准位置"（不在 Gradle 自动扫描目录里），把这行写进**用户级**配置，
+#    不要写进仓库内的 gradle.properties（本 fork 特意让后者保持通用、不含本机路径）：
+#      ~/.gradle/gradle.properties
+#      org.gradle.java.installations.paths=<你的 JDK 目录>
+#    漏了这行时命令行 ./gradlew 会报 "Failed to calculate ... property 'javaCompiler'"
+
+# 1) 数据库：db/ 目录已随仓库提供（.gitkeep 占位），首次启动会自动建库、建表；
+#    但「城市 / 行业」等下拉字典在 boss_option 表里（属数据不属结构），需要一份可用库：
+#    按上游 README 从 release 下载 getjobs.db.template → 重命名为 getjobs.db → 放 db/
 #    老用户直接用自己已有的 db/getjobs.db
 
 # 2) 配置：复制模板后修改（这是本 fork 与上游最大的使用差异）

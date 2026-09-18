@@ -27,7 +27,7 @@
 
 配合 Windows 任务计划程序即可定时投递，例如每天 09:00 自动投一轮、最多 60 个：
     schtasks /create /tn "get_jobs 每日投递" /sc daily /st 09:00 /f ^
-        /tr "\"C:\\path\\to\\python.exe\" \"<PROJECT_ROOT>\\bin\\deliver.py\" --max 60"
+        /tr "\"C:\\path\\to\\python.exe\" \"<项目目录>\\bin\\deliver.py\" --max 60"
 
 企业微信通知：如果 db/getjobs.db 的 config 表里配了 HOOK_URL，脚本会在
 「未登录」「投递结束」「达到上限」「等待超时」几种情况下推一条消息；没配就静默跳过。
