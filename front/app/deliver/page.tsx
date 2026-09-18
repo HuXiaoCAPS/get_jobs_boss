@@ -100,6 +100,9 @@ export default function DeliverPage() {
       esRef.current.close()
       esRef.current = null
     }
+    // 换平台就清空日志：日志是按平台分开推送的，留着上一个平台的内容
+    // 会让人以为它们是同一个任务的输出（而"已连接"那行紧接着会说明现在连的是谁）
+    setLogs([])
     const es = new EventSource(`${API_BASE}/api/platforms/${selected}/stream`)
     es.addEventListener('progress', (ev) => {
       try {
