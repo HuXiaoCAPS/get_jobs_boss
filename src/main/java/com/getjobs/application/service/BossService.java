@@ -1182,19 +1182,45 @@ public class BossService {
      * 薪资解析结果
      */
     public static class SalaryInfo {
-        public Integer minK;      // 最小K（单位：K/月）
-        public Integer maxK;      // 最大K（单位：K/月）
-        public Integer months;    // 月数（默认12）
-        public Double medianK;    // 中位数K
-        public Long annualTotal;  // 年包（单位：元）
+        /** 薪资单位：{@link #UNIT_MONTH}（月薪，以 K 计）/ {@link #UNIT_DAY}（元/天）/ {@link #UNIT_HOUR}（元/时） */
+        public String unit;
+        /** 原始单位下的区间下限 / 上限 / 中位数（月薪时单位是 K，日薪/时薪时单位是元） */
+        public Double min;
+        public Double max;
+        public Double median;
+
+        public Integer minK;      // 最小K（单位：K/月），仅月薪口径
+        public Integer maxK;      // 最大K（单位：K/月），仅月薪口径
+        public Integer months;    // 月数（默认12），仅月薪口径
+        public Double medianK;    // 中位数K，<b>仅月薪口径非空</b>（薪资桶/区间筛选沿用这个字段）
+        public Long annualTotal;  // 年包（单位：元），仅月薪口径
+
+        /** 中位数日薪（元/天），<b>仅日薪口径非空</b>。时薪不折算成日薪 —— 见 parseSalary 的说明 */
+        public Double medianDaily;
     }
 
+    /** 月薪口径（原始数据形如 20-40K、35-65K·16薪） */
+    public static final String UNIT_MONTH = "MONTH";
+    /** 日薪口径（原始数据形如 200-250元/天 —— 实习岗几乎都是这种） */
+    public static final String UNIT_DAY = "DAY";
+    /** 时薪口径（原始数据形如 25-30元/小时） */
+    public static final String UNIT_HOUR = "HOUR";
+
     /**
-     * 解析薪资字符串，支持示例：
-     *  - 20-40K
-     *  - 35-65K·16薪
-     *  - 30K·15薪
-     *  - 面议（返回null）
+     * 解析薪资字符串。
+     *
+     * <p>支持的口径：
+     * <ul>
+     *   <li>月薪 {@code 20-40K} / {@code 30K·15薪} / {@code 8000-12000元/月}</li>
+     *   <li>日薪 {@code 200-250元/天} / {@code 200元/天}（实习岗绝大多数是这种）</li>
+     *   <li>时薪 {@code 25-30元/小时} / {@code 25元/时}</li>
+     *   <li>{@code 面议} 等无法解析的返回 null</li>
+     * </ul>
+     *
+     * <p><b>为什么不把日薪折算成月薪</b>：实习日薪（150~250 元）按 21.75 天折出约 3~5K/月，
+     * 和正职月薪（10~40K）根本不是同一件事，混在一起求平均两个数字都会失真。
+     * 所以按口径分别统计，月薪看 {@code medianK}，日薪看 {@code medianDaily}，
+     * 时薪只解析出区间、不做折算（用它的人自己知道一周排几天班）。
      */
     public static SalaryInfo parseSalary(String salary) {
         if (salary == null) return null;
@@ -1203,6 +1229,58 @@ public class BossService {
         if (s.contains("面议")) return null;
         s = s.replace(" ", "");
 
+        // ---------- 日薪 / 时薪：带「元/天」「元/时」「元/小时」单位 ----------
+        // 必须放在 K 口径之前：这类字符串里也可能出现别的数字，先按单位认定，
+        // 认定不了再退回"K = 月薪"的老逻辑（老数据里 20-40K 这类没有单位词）。
+        Matcher mDay = Pattern.compile("^(\\d+)[-~](\\d+)元[/每](天|日)$").matcher(s);
+        Matcher mDayOne = Pattern.compile("^(\\d+)元[/每](天|日)$").matcher(s);
+        Matcher mHour = Pattern.compile("^(\\d+)[-~](\\d+)元[/每](小?时)$").matcher(s);
+        Matcher mHourOne = Pattern.compile("^(\\d+)元[/每](小?时)$").matcher(s);
+        Matcher mMonthYuan = Pattern.compile("^(\\d+)[-~](\\d+)元[/每]月$").matcher(s);
+
+        SalaryInfo info = new SalaryInfo();
+        // 注意：Matcher.find() 会推进匹配位置，同一个 Matcher 只能判一次 ——
+        // 所以每种形态用一个独立分支，不要写成 "if (a.find() || b.find())" 再回头取 a/b。
+        if (mDay.find()) {
+            info.unit = UNIT_DAY;
+            info.min = Double.parseDouble(mDay.group(1));
+            info.max = Double.parseDouble(mDay.group(2));
+        } else if (mDayOne.find()) {
+            info.unit = UNIT_DAY;
+            info.min = Double.parseDouble(mDayOne.group(1));
+            info.max = info.min;
+        } else if (mHour.find()) {
+            info.unit = UNIT_HOUR;
+            info.min = Double.parseDouble(mHour.group(1));
+            info.max = Double.parseDouble(mHour.group(2));
+        } else if (mHourOne.find()) {
+            info.unit = UNIT_HOUR;
+            info.min = Double.parseDouble(mHourOne.group(1));
+            info.max = info.min;
+        } else if (mMonthYuan.find()) {
+            // 8000-12000元/月 → 折算成 K/月，与 "20-40K" 同口径
+            info.unit = UNIT_MONTH;
+            info.min = Double.parseDouble(mMonthYuan.group(1)) / 1000.0;
+            info.max = Double.parseDouble(mMonthYuan.group(2)) / 1000.0;
+            info.minK = (int) Math.round(info.min);
+            info.maxK = (int) Math.round(info.max);
+            info.months = 12;
+            info.median = (info.min + info.max) / 2.0;
+            info.medianK = info.median;
+            info.annualTotal = Math.round(info.medianK * 1000 * 12);
+            return info;
+        }
+
+        if (info.unit != null) {
+            // 日薪 / 时薪：只填原始单位下的区间与中位数
+            info.median = (info.min + info.max) / 2.0;
+            if (UNIT_DAY.equals(info.unit)) {
+                info.medianDaily = info.median;
+            }
+            return info;
+        }
+
+        // ---------- 月薪（K）：保持原有解析，兼容老数据 ----------
         Integer months = 12;
         // 提取 months=xx（如 ·16薪）
         Matcher mMonths = Pattern.compile("[·\\.\\-]?([0-9]+)薪").matcher(s);
@@ -1238,11 +1316,14 @@ public class BossService {
 
         if (minK == null || maxK == null) return null;
 
-        SalaryInfo info = new SalaryInfo();
+        info.unit = UNIT_MONTH;
+        info.min = minK.doubleValue();
+        info.max = maxK.doubleValue();
         info.minK = minK;
         info.maxK = maxK;
         info.months = months != null ? months : 12;
         info.medianK = (minK + maxK) / 2.0;
+        info.median = info.medianK;
         info.annualTotal = Math.round(info.medianK * 1000 * info.months);
         return info;
     }
@@ -1254,7 +1335,10 @@ public class BossService {
         public long pending;
         public long filtered;
         public long failed;
-        public Double avgMonthlyK; // 平均中位数K
+        /** 平均月薪（中位数 K/月）；只由月薪口径的岗位算出，没有则 null */
+        public Double avgMonthlyK;
+        /** 平均日薪（中位数 元/天）；只由日薪口径的岗位算出，没有则 null */
+        public Double avgDailyYuan;
     }
 
     /** 通用 name-value 项 */
@@ -1282,6 +1366,8 @@ public class BossService {
         public List<NameValue> byExperience;
         public List<NameValue> byDegree;
         public List<BucketValue> salaryBuckets;
+        /** 日薪档位（元/天）。与 salaryBuckets 分开：两套口径的档位没法画在同一根轴上 */
+        public List<BucketValue> dailySalaryBuckets;
         public List<NameValue> dailyTrend; // date 作为 name
         public List<NameValue> hrActivity;
     }
@@ -1314,6 +1400,7 @@ public class BossService {
         charts.byExperience = new ArrayList<>();
         charts.byDegree = new ArrayList<>();
         charts.salaryBuckets = new ArrayList<>();
+        charts.dailySalaryBuckets = new ArrayList<>();
         charts.dailyTrend = new ArrayList<>();
         charts.hrActivity = new ArrayList<>();
 
@@ -1325,19 +1412,20 @@ public class BossService {
             resp.kpi.filtered = scalarCount(conn, "SELECT COUNT(*) FROM boss_data WHERE delivery_status='已过滤'");
             resp.kpi.failed = scalarCount(conn, "SELECT COUNT(*) FROM boss_data WHERE delivery_status='投递失败'");
 
-            // 平均中位数K（忽略面议）
-            double sumMedian = 0.0; long countMedian = 0;
+            // 平均薪资：按口径分开算（月薪 K / 日薪 元）。混在一起算会两个数字都失真 ——
+            // 实习日薪折成月薪也就 3~5K，和正职 10~40K 不是同一件事。
+            double sumMonthlyK = 0.0; long cntMonthly = 0;
+            double sumDaily = 0.0; long cntDaily = 0;
             try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT salary FROM boss_data WHERE salary IS NOT NULL")) {
                 while (rs.next()) {
-                    String s = rs.getString(1);
-                    SalaryInfo info = parseSalary(s);
-                    if (info != null && info.medianK != null) {
-                        sumMedian += info.medianK;
-                        countMedian++;
-                    }
+                    SalaryInfo info = parseSalary(rs.getString(1));
+                    if (info == null) continue;
+                    if (info.medianK != null) { sumMonthlyK += info.medianK; cntMonthly++; }
+                    if (info.medianDaily != null) { sumDaily += info.medianDaily; cntDaily++; }
                 }
             }
-            resp.kpi.avgMonthlyK = countMedian > 0 ? Math.round((sumMedian / countMedian) * 100.0) / 100.0 : null;
+            resp.kpi.avgMonthlyK = cntMonthly > 0 ? Math.round((sumMonthlyK / cntMonthly) * 100.0) / 100.0 : null;
+            resp.kpi.avgDailyYuan = cntDaily > 0 ? Math.round((sumDaily / cntDaily) * 100.0) / 100.0 : null;
 
             // byStatus
             try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT delivery_status, COUNT(*) AS cnt FROM boss_data GROUP BY delivery_status")) {
@@ -1407,6 +1495,27 @@ public class BossService {
             charts.salaryBuckets.add(new BucketValue("20-" + topEdge + "K", b20_top));
             charts.salaryBuckets.add(new BucketValue(">=" + topEdge + "K", b_ge_top));
 
+            // dailySalaryBuckets（日薪档位，元/天）：实习岗的薪资几乎都是这个口径，
+            // 不分出来的话它们一条也进不了上面的月薪桶，图上看着就像"没有薪资数据"。
+            long d0_150=0,d150_200=0,d200_250=0,d250_300=0,d_ge_300=0;
+            try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT salary FROM boss_data WHERE salary IS NOT NULL")) {
+                while (rs.next()) {
+                    SalaryInfo info = parseSalary(rs.getString(1));
+                    if (info == null || info.medianDaily == null) continue;
+                    double m = info.medianDaily;
+                    if (m < 150) d0_150++;
+                    else if (m < 200) d150_200++;
+                    else if (m < 250) d200_250++;
+                    else if (m < 300) d250_300++;
+                    else d_ge_300++;
+                }
+            }
+            charts.dailySalaryBuckets.add(new BucketValue("0-150元", d0_150));
+            charts.dailySalaryBuckets.add(new BucketValue("150-200元", d150_200));
+            charts.dailySalaryBuckets.add(new BucketValue("200-250元", d200_250));
+            charts.dailySalaryBuckets.add(new BucketValue("250-300元", d250_300));
+            charts.dailySalaryBuckets.add(new BucketValue(">=300元", d_ge_300));
+
             resp.charts = charts;
             return resp;
         } catch (Exception e) {
@@ -1465,16 +1574,19 @@ public class BossService {
 
             List<BossJobDataEntity> all = bossJobDataMapper.selectList(wrapper);
 
-            // 内存进行薪资区间过滤（按中位数K）
+            // 内存进行薪资区间过滤。
+            // 区间一律按「月薪 K」这一个口径比：日薪岗（如 200-250元/天）的 medianK 是 null，
+            // 所以只在填了区间时会被筛掉 —— 不填区间就全部保留，不影响正常浏览。
             List<BossJobDataEntity> filtered = new ArrayList<>();
-            double sumMedian = 0.0; long countMedian = 0;
+            double sumMonthlyK = 0.0; long cntMonthly = 0;
+            double sumDaily = 0.0; long cntDaily = 0;
             for (BossJobDataEntity e : all) {
                 SalaryInfo info = parseSalary(e.getSalary());
                 boolean passSalary;
                 if (minK == null && maxK == null) {
                     passSalary = true;
                 } else {
-                    if (info == null || info.medianK == null) passSalary = false; // 面议或不可解析
+                    if (info == null || info.medianK == null) passSalary = false; // 面议 / 日薪 / 不可解析
                     else {
                         boolean ok = true;
                         if (minK != null) ok = ok && (info.medianK >= minK);
@@ -1484,7 +1596,10 @@ public class BossService {
                 }
                 if (passSalary) {
                     filtered.add(e);
-                    if (info != null && info.medianK != null) { sumMedian += info.medianK; countMedian++; }
+                    if (info != null) {
+                        if (info.medianK != null) { sumMonthlyK += info.medianK; cntMonthly++; }
+                        if (info.medianDaily != null) { sumDaily += info.medianDaily; cntDaily++; }
+                    }
                 }
             }
 
@@ -1494,7 +1609,8 @@ public class BossService {
             resp.kpi.pending = filtered.stream().filter(e -> "未投递".equals(e.getDeliveryStatus())).count();
             resp.kpi.filtered = filtered.stream().filter(e -> "已过滤".equals(e.getDeliveryStatus())).count();
             resp.kpi.failed = filtered.stream().filter(e -> "投递失败".equals(e.getDeliveryStatus())).count();
-            resp.kpi.avgMonthlyK = countMedian > 0 ? Math.round((sumMedian / countMedian) * 100.0) / 100.0 : null;
+            resp.kpi.avgMonthlyK = cntMonthly > 0 ? Math.round((sumMonthlyK / cntMonthly) * 100.0) / 100.0 : null;
+            resp.kpi.avgDailyYuan = cntDaily > 0 ? Math.round((sumDaily / cntDaily) * 100.0) / 100.0 : null;
 
             // Charts - 分组聚合（在内存中统计）
             Map<String, Long> byStatus = filtered.stream()
@@ -1572,6 +1688,24 @@ public class BossService {
             charts.salaryBuckets.add(new BucketValue("15-20K", b15_20));
             charts.salaryBuckets.add(new BucketValue("20-" + topEdge + "K", b20_top));
             charts.salaryBuckets.add(new BucketValue(">=" + topEdge + "K", b_ge_top));
+
+            // dailySalaryBuckets（日薪档位，元/天），与无参版口径保持一致
+            long d0_150=0,d150_200=0,d200_250=0,d250_300=0,d_ge_300=0;
+            for (BossJobDataEntity e : filtered) {
+                SalaryInfo info = parseSalary(e.getSalary());
+                if (info == null || info.medianDaily == null) continue;
+                double m = info.medianDaily;
+                if (m < 150) d0_150++;
+                else if (m < 200) d150_200++;
+                else if (m < 250) d200_250++;
+                else if (m < 300) d250_300++;
+                else d_ge_300++;
+            }
+            charts.dailySalaryBuckets.add(new BucketValue("0-150元", d0_150));
+            charts.dailySalaryBuckets.add(new BucketValue("150-200元", d150_200));
+            charts.dailySalaryBuckets.add(new BucketValue("200-250元", d200_250));
+            charts.dailySalaryBuckets.add(new BucketValue("250-300元", d250_300));
+            charts.dailySalaryBuckets.add(new BucketValue(">=300元", d_ge_300));
 
             resp.charts = charts;
             return resp;

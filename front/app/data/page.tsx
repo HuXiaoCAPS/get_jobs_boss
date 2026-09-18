@@ -38,7 +38,10 @@ type Stats = {
     pending?: number
     filtered?: number
     failed?: number
+    /** 平均月薪（中位数 K/月），只有月薪口径的岗位参与平均 */
     avgMonthlyK?: number | null
+    /** 平均日薪（中位数 元/天），只有日薪口径的岗位参与平均（实习岗基本都是这种） */
+    avgDailyYuan?: number | null
   }
 }
 
@@ -147,14 +150,21 @@ export default function DataPage() {
         来自 <code>boss_data</code> 表（只读）。筛选条件与统计口径一致；展示偏好在外观页里改。
       </p>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
         <Kpi label="全部" value={kpi.total} />
         <Kpi label="已投递" value={kpi.delivered} />
         <Kpi label="未投递" value={kpi.pending} />
         <Kpi label="已过滤" value={kpi.filtered} />
         <Kpi label="投递失败" value={kpi.failed} />
-        <Kpi label="平均薪资(K)" value={kpi.avgMonthlyK ?? undefined} />
+        <Kpi label="平均月薪(K)" value={kpi.avgMonthlyK ?? undefined} />
+        <Kpi label="平均日薪(元/天)" value={kpi.avgDailyYuan ?? undefined} />
       </div>
+
+      <p className="mb-4 text-xs text-gray-500">
+        平均月薪与平均日薪<b>分开统计</b>：实习岗多按「元/天」报价，折算成月薪（约 3~5K）与正职月薪
+        （10~40K）不是一回事，混在一起平均两个数字都会失真。所以按岗位自己的计价口径分别汇总，
+        哪个口径没有数据就显示「-」。上方的「最低K / 最高K」只比对月薪口径。
+      </p>
 
       {/* 筛选条 */}
       <div className="mb-4 border border-gray-200 p-3">
