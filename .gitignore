@@ -62,3 +62,12 @@ dist/
 .gradle/
 # 持久化浏览器用户数据（含登录态，绝对不能提交）
 browser-data/
+
+# 本地配置（含 API KEY，绝对不能提交；结构与模板见 config/boss.yaml.example）
+config/boss.yaml
+
+# Reasonix 会话与工具目录（本地）
+.reasonix/
+
+# 改造过程中的临时备份与一次性脚本（本地）
+.obsolete/
