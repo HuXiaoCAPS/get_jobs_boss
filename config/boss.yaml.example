@@ -14,9 +14,17 @@
 #    可以放心提交到仓库。
 # ============================================================
 
+# ---------- 浏览器 ----------
+# 自动化（抓岗位、投递）用哪个浏览器内核：
+#   msedge   = Microsoft Edge（默认；复用系统自带，不额外下载 Chromium 内核）
+#   chrome   = 本机装的 Google Chrome
+#   chromium = Playwright 自带内核
+browser:
+  channel: msedge
+
 # ---------- 管理页（可选）----------
 # 程序启动后自动打开管理页时，用哪个浏览器：
-#   msedge  = 优先 Microsoft Edge（默认；本项目的自动化本来就用 Edge）
+#   msedge  = 优先 Microsoft Edge（默认）
 #   default = 交给系统默认浏览器
 #   其它    = 当作可执行文件路径直接用，例如
 #             C:/Program Files/Google/Chrome/Application/chrome.exe
@@ -83,3 +91,32 @@ ai:
 notify:
   hook_url: ""                        # 企业微信群机器人 webhook，留空则不推送
   bot_is_send: false
+
+# ---------- JD 过滤规则（可选）----------
+# 网页端「配置 → 过滤规则」编辑的就是这一段；也可以直接改这里（两边等价）。
+#   action    必填：reject=命中即拒 / require=必须命中 / warn=只记提示
+#   name      规则名，只用于日志与网页端展示
+#   threshold 命中多少个「不同的词」才算命中，默认 1
+#   note      备注，纯给自己看
+#   words     词表
+# 判定顺序：JD 为空→放行；再判 reject；再判 require；最后收集 warn。
+# 提醒：匹配方式是「包含」，而 JD 是几千字长文，很容易误伤 ——
+#   「销售」会命中「配合销售部门出报表」（其实是好岗位）
+#   「数据分析」会命中「无需数据分析经验」（意思正好相反）
+# 所以优先写【短语 / 否定式说法】，而不是笼统的行业词。
+jd_rules: []
+# 一个可用的例子（取消注释即可）：
+# jd_rules:
+#   - action: reject
+#     name: 明确高门槛
+#     threshold: 1
+#     note: 挡研究生、3 年以上经验、非实习岗位
+#     words:
+#       - 仅研究生
+#       - 需 3 年以上
+#       - 非实习岗位
+#   - action: require
+#     name: 方向对口
+#     threshold: 2
+#     note: 至少命中两个组件词，才算数据方向
+#     words: [Hadoop, Hive, Spark, Flink, Doris, Kafka, 数仓, ETL]

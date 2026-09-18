@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.getjobs.application.entity.CookieEntity;
+import com.getjobs.application.service.ConfigFileService;
 import com.getjobs.application.service.CookieService;
 import com.microsoft.playwright.*;
 import com.microsoft.playwright.options.Cookie;
@@ -104,6 +105,10 @@ public class PlaywrightManager {
 
     @Autowired
     private CookieService cookieService;
+
+    /** 读当前生效的配置文件：自动化浏览器用哪个内核（browser.channel）配在它里面 */
+    @Autowired
+    private ConfigFileService configFileService;
 
     // ------------------------------------------------------------------
     // Playwright 单线程调度
@@ -348,6 +353,37 @@ public class PlaywrightManager {
         }
     }
 
+    /** 配置文件里的浏览器段：自动化用哪个内核 */
+    private static final String BROWSER_SECTION = "browser";
+    private static final String BROWSER_CHANNEL_KEY = "channel";
+    /** 默认值：复用 Windows 自带的 Edge（同为 Chromium 内核，Playwright 原生支持） */
+    private static final String DEFAULT_BROWSER_CHANNEL = "msedge";
+
+    /**
+     * 自动化浏览器用哪个内核，取值自当前生效的配置文件的 {@code browser.channel}。
+     *
+     * <p>可选 {@code msedge} / {@code chrome} / {@code chromium}，缺省 {@code msedge}：
+     * 本机没装 Chrome 时复用 Windows 自带的 Edge，避免 Playwright 去下载一整套 Chromium。
+     *
+     * <p>以前读的是环境变量 {@code BROWSER_CHANNEL}，已改成配置文件 ——
+     * 环境变量在 IDE、命令行、系统里各有一套，改了不生效时很难查；
+     * 而这个值又天然和"哪份配置在生效"绑在一起（不同配置可以用不同内核）。
+     */
+    private String resolveBrowserChannel() {
+        try {
+            Object section = configFileService.read().get(BROWSER_SECTION);
+            if (section instanceof Map<?, ?> map) {
+                Object value = map.get(BROWSER_CHANNEL_KEY);
+                if (value != null && !value.toString().isBlank()) {
+                    return value.toString().trim();
+                }
+            }
+        } catch (Exception e) {
+            log.debug("读取 browser.channel 失败，用默认值：{}", e.getMessage());
+        }
+        return DEFAULT_BROWSER_CHANNEL;
+    }
+
     /**
      * 创建 Playwright 实例，并把 driver 指向 patchright。
      * <p>
@@ -355,16 +391,6 @@ public class PlaywrightManager {
      * 会静默退回官方 driver-bundle，反检测全部失效。所以这里自己找一遍，
      * 保证不管用什么方式启动，跑的都是 patchright。
      */
-    private static String resolveBrowserChannel() {
-        String channel = System.getenv("BROWSER_CHANNEL");
-        if (channel != null && !channel.isBlank()) {
-            return channel.trim();
-        }
-        // 本机没装 Chrome 时复用 Windows 自带的 Edge（同为 Chromium 内核，Playwright 原生支持），
-        // 避免 Playwright 去下载一整套 Chromium。需要换回真 Chrome 时设 BROWSER_CHANNEL=chrome
-        return "msedge";
-    }
-
     private Playwright createPlaywright() {
         if (System.getProperty("playwright.cli.dir") == null) {
             Path driverDir = locatePatchrightDriver();
@@ -865,8 +891,16 @@ public class PlaywrightManager {
         if (previousStatus == null || previousStatus != isLoggedIn) {
             loginStatus.put(platform, isLoggedIn);
 
-            // Boss平台：在设置未登录状态时，顺带引导到登录页并切换二维码扫码
-            if ("boss".equals(platform) && !isLoggedIn) {
+            // Boss平台：只有"首次判定为未登录"时才自动引导到登录页。
+            //
+            // 这里必须限定 previousStatus == null，不能对每次未登录都导航：检测本身会误判 ——
+            // 页面正在跳转、cookie 还没落地、渲染慢，都会让 checkIfLoggedIn() 短暂返回 false。
+            // 已登录状态下吃到一次误判，就会把用户直接从岗位页踹回登录页。
+            // 首次无缓存登录时最容易踩到：扫码成功后页面要连跳好几步
+            // （登录页 → 首页 → 目标页），中间任何一次探测落在空档上就会命中，
+            // 表现为"刚登录就被弹回登录页、登录流程反复重来"。
+            // true → false 只更新状态并通知前端（前端据此提示需要登录），不再自动导航。
+            if ("boss".equals(platform) && !isLoggedIn && previousStatus == null) {
                 try {
                     if (bossPage != null) {
                         String currentUrl = null;

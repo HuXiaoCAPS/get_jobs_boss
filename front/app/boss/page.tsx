@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { API_BASE } from '@/lib/api'
 import JdRulesSection from '@/app/components/JdRulesSection'
 
@@ -14,21 +14,28 @@ import JdRulesSection from '@/app/components/JdRulesSection'
  *
  * 设计约定：
  *   - 每项一行：左边标签、右边控件；无圆角、无阴影、无渐变
- *   - 配置以 config/boss.yaml 为权威来源，保存时后端会写文件再同步回库
- *   - API 地址 / API Key / 模型**不在这里改**（只允许编辑 config/boss.yaml），
+ *   - 配置以 config/ 下的配置文件为权威来源，保存时后端会写文件再同步回库
+ *   - 这页很长，所以配置文件的四个操作放在**右上角固定按钮**（另存为 / 载入 / 选择 / 保存），
+ *     不用滚到底部再滚回来；另存为与选择各配一个弹窗
+ *   - **前端不暴露"文件"这一层**：不出现 .yaml 后缀、不显示文件路径，
+ *     用户面对的是「一份配置」，换配置就是换那一份
+ *   - API 地址 / API Key / 模型**不在这里改**（只允许编辑配置文件），
  *     因为网页端是明文输入框，容易泄露；改了文件后启动/投递前会自动同步到库
  *   - 城市是逗号分隔的输入框：能表达多城市（深圳,广州），留空 = 不限
- *   - 过滤规则（项目根目录 jd-rules.txt）由下面的 <JdRulesSection /> 独立编辑与保存，
- *     与这里的「保存」（写 config/boss.yaml）互不影响
+ *   - 过滤规则由 <JdRulesSection /> 独立编辑与保存，跟随当前配置，
+ *     与这里的「保存」互不影响
  */
 
 type Option = { name: string; code: string }
 type Blacklist = { id: number; type: string; value: string }
 type Dict = Record<string, string[]>
 type Form = Record<string, unknown>
+/** 一份配置：名字 + 是否当前生效 + 有没有配过滤规则 */
+type Profile = { name: string; active: boolean; hasRules: boolean }
 
 const INPUT =
   'w-full border border-gray-300 bg-white px-2 py-1 text-sm outline-none focus:border-gray-800'
+const BTN = 'border border-gray-300 px-3 py-1 text-sm hover:border-gray-800'
 
 /** "[本科,大专]" 或 "本科,大专" → ["本科","大专"] */
 function parseList(raw?: unknown): string[] {
@@ -44,6 +51,11 @@ function parseList(raw?: unknown): string[] {
 /** ["本科","大专"] → "[本科,大专]"（后端约定：多选存中文名括号列表） */
 function toBracket(list: string[]): string {
   return list.length ? `[${list.join(',')}]` : ''
+}
+
+/** 配置名 → 给人看的名字：去掉 .yaml 后缀（前端不暴露文件这一层） */
+function displayName(name: string): string {
+  return (name || '').replace(/\.yaml$/i, '')
 }
 
 export default function BossPage() {
@@ -69,6 +81,15 @@ export default function BossPage() {
 
   // 通知
   const [notify, setNotify] = useState({ hookUrl: '', botIsSend: 0 })
+
+  // 配置：全部可选项 + 当前生效的那份
+  const [profiles, setProfiles] = useState<Profile[]>([])
+  const [activeProfile, setActiveProfile] = useState('')
+  // 当前打开的弹窗：另存为 / 选择
+  const [dialog, setDialog] = useState<'saveAs' | 'pick' | null>(null)
+  const [nameDraft, setNameDraft] = useState('')
+  // 「载入」用的隐藏文件选择器
+  const fileRef = useRef<HTMLInputElement>(null)
 
   // 行业选项多，默认收起
   const [showIndustry, setShowIndustry] = useState(false)
@@ -140,6 +161,18 @@ export default function BossPage() {
       } catch {
         /* 通知配置读不到不影响其它项 */
       }
+
+      // 配置列表（有哪些可选、当前哪份生效）
+      try {
+        const pfRes = await fetch(`${API_BASE}/api/boss/config-files`)
+        if (pfRes.ok) {
+          const pfData = await pfRes.json()
+          setProfiles(pfData?.data?.files || [])
+          setActiveProfile(pfData?.data?.active || '')
+        }
+      } catch {
+        /* 配置列表读不到不影响编辑当前配置 */
+      }
     } catch (e) {
       setErr(`加载配置失败：${(e as Error).message}（检查后端是否已启动）`)
     } finally {
@@ -150,6 +183,95 @@ export default function BossPage() {
   function set(key: string, value: unknown) {
     setForm((prev) => ({ ...prev, [key]: value }))
   }
+
+  /** 配置相关的接口都返回 {success, data, message}，统一处理提示并重新拉取 */
+  async function profileAction(path: string, init: RequestInit, okMsg: string): Promise<boolean> {
+    setMsg('')
+    setErr('')
+    try {
+      const res = await fetch(`${API_BASE}/api/boss/config-files${path}`, init)
+      const data = await res.json().catch(() => null)
+      if (!res.ok || data?.success === false) {
+        throw new Error(data?.message || `HTTP ${res.status}`)
+      }
+      setMsg(okMsg)
+      await load()
+      return true
+    } catch (e) {
+      setErr(`操作失败：${(e as Error).message}`)
+      return false
+    }
+  }
+
+  const jsonInit = (body: unknown): RequestInit => ({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+  // ---------- 另存为 ----------
+
+  function openSaveAs() {
+    setNameDraft(`${displayName(activeProfile)} 副本`)
+    setDialog('saveAs')
+  }
+
+  async function doSaveAs() {
+    const name = nameDraft.trim()
+    if (!name) return
+    const done = await profileAction('/save-as', jsonInit({ name }), `已另存为「${name}」并切换过去`)
+    if (done) setDialog(null)
+  }
+
+  // ---------- 选择 ----------
+
+  function pickProfile(name: string) {
+    setDialog(null)
+    if (name === activeProfile) return
+    void profileAction('/switch', jsonInit({ name }), `已切换到「${displayName(name)}」`)
+  }
+
+  function renameProfile(name: string) {
+    const input = prompt('新的配置名称', displayName(name))
+    if (!input || !input.trim()) return
+    const to = input.trim()
+    void profileAction('/rename', jsonInit({ from: name, to }), `已重命名为「${displayName(to)}」`)
+  }
+
+  function removeProfile(name: string) {
+    if (!confirm(`删除配置「${displayName(name)}」？它的过滤规则会一起删掉，不可撤销。`)) return
+    void profileAction(
+      `?name=${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+      `已删除「${displayName(name)}」`,
+    )
+  }
+
+  // ---------- 载入 ----------
+
+  function triggerImport() {
+    fileRef.current?.click()
+  }
+
+  async function onFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    // 立刻清空，否则连续选同一个文件不会再触发 change
+    e.target.value = ''
+    if (!file) return
+    if (!confirm(`导入「${file.name}」会覆盖当前配置「${displayName(activeProfile)}」，且不可撤销。继续？`)) {
+      return
+    }
+    let content: string
+    try {
+      content = await file.text()
+    } catch (readErr) {
+      setErr(`读取文件失败：${(readErr as Error).message}`)
+      return
+    }
+    await profileAction('/import', jsonInit({ content }), '已导入并覆盖当前配置')
+  }
+
+  // ---------- 保存 ----------
 
   async function save() {
     setMsg('')
@@ -178,7 +300,7 @@ export default function BossPage() {
       })
       if (!res.ok) throw new Error(`Boss 配置 HTTP ${res.status}`)
 
-      // AI 提示词 / 我的资料 → ai 表 + config/boss.yaml 的 ai 块
+      // AI 提示词 / 我的资料 → ai 表 + 当前配置的 ai 块
       const aiRes = await fetch(`${API_BASE}/api/ai/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -186,7 +308,7 @@ export default function BossPage() {
       })
       if (!aiRes.ok) throw new Error(`AI 配置 HTTP ${aiRes.status}`)
 
-      // 通知 → config 表 + config/boss.yaml 的 notify 块
+      // 通知 → config 表 + 当前配置的 notify 块
       const notifyRes = await fetch(`${API_BASE}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -197,7 +319,7 @@ export default function BossPage() {
       })
       if (!notifyRes.ok) throw new Error(`通知配置 HTTP ${notifyRes.status}`)
 
-      setMsg('已保存 → 写入 config/boss.yaml（并同步回数据库）')
+      setMsg('已保存（并同步回数据库）')
       await load()
     } catch (e) {
       setErr(`保存失败：${(e as Error).message}`)
@@ -236,14 +358,42 @@ export default function BossPage() {
   }
 
   const industrySelected = (multi.industry || []).length
+  const activeRuleMissing = profiles.find((p) => p.active)?.hasRules === false
 
   return (
     <div className="max-w-4xl text-sm">
-      <h1 className="mb-1 text-lg font-semibold">配置</h1>
-      <p className="mb-5 text-xs text-gray-500">
-        保存后写入 <code>config/boss.yaml</code>（以文件为准，之后也可以直接编辑该文件）。
-        投递记录等数据在「数据」页查看。
-      </p>
+      {/* 标题 + 配置操作：右侧固定在视口顶部，页面再长也不用滚到底部找按钮 */}
+      <div className="mb-5 flex items-start justify-between gap-6">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold">配置</h1>
+          <p className="mt-1 text-xs text-gray-500">
+            保存后写入当前配置（以文件为准）。投递记录等数据在「数据」页查看。
+          </p>
+        </div>
+
+        <div className="sticky top-0 z-10 flex shrink-0 items-center gap-2 bg-white py-1">
+          <span className="mr-1 text-xs text-gray-500">当前：{displayName(activeProfile) || '—'}</span>
+          <button className={BTN} onClick={openSaveAs}>
+            另存为
+          </button>
+          <button className={BTN} onClick={triggerImport}>
+            载入
+          </button>
+          <button className={BTN} onClick={() => setDialog('pick')}>
+            选择
+          </button>
+          <button className="border border-gray-800 bg-gray-900 px-4 py-1 text-white" onClick={() => void save()}>
+            保存
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".yaml,.yml,text/yaml,application/yaml"
+            className="hidden"
+            onChange={(e) => void onFilePicked(e)}
+          />
+        </div>
+      </div>
 
       {err && <div className="mb-4 border-l-2 border-red-500 bg-red-50 px-3 py-2 text-red-700">{err}</div>}
       {msg && <div className="mb-4 border-l-2 border-green-600 bg-green-50 px-3 py-2 text-green-700">{msg}</div>}
@@ -389,10 +539,11 @@ export default function BossPage() {
         </Row>
       </Section>
 
-      {/* 过滤规则：直接编辑项目根目录的 jd-rules.txt（与上面写 boss.yaml 的「保存」互不影响） */}
-      <JdRulesSection />
+      {/* 过滤规则：编辑当前配置对应的规则（与写配置的「保存」互不影响）。
+          profile 变化时组件内部会重新拉取，保证换配置后显示的是新那份。 */}
+      <JdRulesSection profile={activeProfile} />
 
-      <Section title="AI 提示词与我的资料" hint="AI 生成招呼语时用它们了解你，并决定说什么（保存进 config/boss.yaml 的 ai 块）">
+      <Section title="AI 提示词与我的资料" hint="AI 生成招呼语时用它们了解你，并决定说什么（保存进当前配置的 ai 块）">
         <Row label="我的资料" hint="技能、经验、技术栈、项目经历……写得越具体，生成的话术越贴合">
           <textarea
             className={INPUT}
@@ -428,9 +579,12 @@ export default function BossPage() {
           <Bool value={notify.botIsSend} onChange={(v) => setNotify({ ...notify, botIsSend: v })} />
         </Row>
 
-        <Row label="AI 接口（只读）" hint="API 地址 / API Key / 模型只能改 config/boss.yaml，网页端不提供输入（避免明文泄露）；改完文件后启动或投递前会自动同步到数据库">
+        <Row
+          label="AI 接口（只读）"
+          hint="API 地址 / API Key / 模型只能改配置文件，网页端不提供输入（避免明文泄露）；改完文件后启动或投递前会自动同步到数据库"
+        >
           <div className="px-2 py-1 text-xs text-gray-500">
-            见 <code>config/boss.yaml</code> 的 <code>ai.base_url</code> / <code>ai.api_key</code> / <code>ai.model</code>
+            见当前配置的 <code>ai.base_url</code> / <code>ai.api_key</code> / <code>ai.model</code>
           </div>
         </Row>
       </Section>
@@ -478,14 +632,82 @@ export default function BossPage() {
         )}
       </Section>
 
+      {/* 底部只留「重新加载」；保存已移到右上角固定区 */}
       <div className="mt-6 flex items-center gap-3">
-        <button className="border border-gray-800 bg-gray-900 px-5 py-1.5 text-white" onClick={() => void save()}>
-          保存
-        </button>
-        <button className="border border-gray-300 px-5 py-1.5" onClick={() => void load()}>
+        <button className={BTN + ' px-5 py-1.5'} onClick={() => void load()}>
           重新加载
         </button>
+        {activeRuleMissing && (
+          <span className="text-xs text-gray-400">当前配置还没有过滤规则 —— 在下面的「过滤规则」里加几条即可</span>
+        )}
       </div>
+
+      {/* ---------- 弹窗：另存为 ---------- */}
+      {dialog === 'saveAs' && (
+        <Modal title="另存为" onClose={() => setDialog(null)}>
+          <p className="mb-2 text-xs text-gray-500">
+            以当前配置「{displayName(activeProfile)}」为模板复制一份，并切换过去。
+          </p>
+          <input
+            className={INPUT}
+            autoFocus
+            placeholder="例如：数据开发"
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void doSaveAs()
+            }}
+          />
+          <div className="mt-3 flex justify-end gap-2">
+            <button className={BTN} onClick={() => setDialog(null)}>
+              取消
+            </button>
+            <button className="border border-gray-800 bg-gray-900 px-4 py-1 text-white" onClick={() => void doSaveAs()}>
+              确定
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ---------- 弹窗：选择 ---------- */}
+      {dialog === 'pick' && (
+        <Modal title="选择配置" onClose={() => setDialog(null)}>
+          <p className="mb-2 text-xs text-gray-500">
+            点一行即切换（立即生效，不用重启）。切换后整页配置与过滤规则都换成它的。
+          </p>
+          <div className="max-h-72 overflow-y-auto border border-gray-200">
+            {profiles.length === 0 && <div className="px-2 py-2 text-gray-500">(没有可选的配置)</div>}
+            {profiles.map((p) => (
+              <div
+                key={p.name}
+                className={
+                  'flex items-center gap-2 border-b border-gray-100 px-2 py-1.5 last:border-b-0 ' +
+                  (p.active ? 'bg-gray-50' : '')
+                }
+              >
+                <button className="flex-1 text-left hover:underline" onClick={() => pickProfile(p.name)}>
+                  {displayName(p.name)}
+                  {p.active && <span className="ml-2 text-xs text-green-700">● 当前</span>}
+                  {!p.hasRules && <span className="ml-2 text-xs text-gray-400">无过滤规则</span>}
+                </button>
+                <button className="shrink-0 text-xs text-gray-600 hover:underline" onClick={() => renameProfile(p.name)}>
+                  改名
+                </button>
+                {!p.active && (
+                  <button className="shrink-0 text-xs text-red-600 hover:underline" onClick={() => removeProfile(p.name)}>
+                    删除
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button className={BTN} onClick={() => setDialog(null)}>
+              关闭
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -545,5 +767,25 @@ function Bool({ value, onChange }: { value: unknown; onChange: (v: number) => vo
       <input type="checkbox" className="accent-gray-800" checked={on} onChange={(e) => onChange(e.target.checked ? 1 : 0)} />
       <span className="text-gray-600">{on ? '开启' : '关闭'}</span>
     </label>
+  )
+}
+
+/** 极简弹窗：点遮罩或按 Esc 关闭 */
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
+      <div className="w-[26rem] border border-gray-800 bg-white p-4" onClick={(e) => e.stopPropagation()}>
+        <h3 className="mb-3 border-b border-gray-300 pb-1 text-sm font-semibold">{title}</h3>
+        {children}
+      </div>
+    </div>
   )
 }

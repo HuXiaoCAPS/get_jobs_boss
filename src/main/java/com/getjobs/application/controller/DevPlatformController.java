@@ -1,6 +1,7 @@
 package com.getjobs.application.controller;
 
 import com.getjobs.application.service.AiService;
+import com.getjobs.application.service.ConfigFileService;
 import com.getjobs.application.service.DeliveryPolicyService;
 import com.getjobs.worker.platform.DeliveryRunner;
 import com.getjobs.worker.platform.fake.FakePlatform;
@@ -35,10 +36,15 @@ public class DevPlatformController {
 
     private final AiService aiService;
     private final DeliveryPolicyService deliveryPolicyService;
+    /** 假平台验收也要按"当前生效的配置"去找规则文件，所以这里一并注入 */
+    private final ConfigFileService configFileService;
 
-    public DevPlatformController(AiService aiService, DeliveryPolicyService deliveryPolicyService) {
+    public DevPlatformController(AiService aiService,
+                                 DeliveryPolicyService deliveryPolicyService,
+                                 ConfigFileService configFileService) {
         this.aiService = aiService;
         this.deliveryPolicyService = deliveryPolicyService;
+        this.configFileService = configFileService;
     }
 
     /**
@@ -54,7 +60,7 @@ public class DevPlatformController {
     public Map<String, Object> fakeDelivery() {
         InMemoryDeliveryStore store = new InMemoryDeliveryStore();
         FakePlatform platform = new FakePlatform(store);
-        DeliveryRunner runner = new DeliveryRunner(aiService, deliveryPolicyService);
+        DeliveryRunner runner = new DeliveryRunner(aiService, deliveryPolicyService, configFileService);
 
         List<JobProgressMessage> progress = new ArrayList<>();
         DeliveryRunner.RunResult result = runner.run(

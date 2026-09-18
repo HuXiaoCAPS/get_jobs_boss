@@ -52,8 +52,10 @@ public class DeliveryRunner {
 
     private final AiService aiService;
     private final com.getjobs.application.service.DeliveryPolicyService deliveryPolicyService;
+    /** 用来知道「当前生效的是哪份配置」，从而定位对应的 JD 规则文件 */
+    private final com.getjobs.application.service.ConfigFileService configFileService;
 
-    /** JD 规则过滤器：每轮开始 reload()，改完 jd-rules.txt 重跑任务即生效 */
+    /** JD 规则过滤器：每轮开始按当前配置 reload()，改完规则文件重跑任务即生效 */
     private final JdRuleFilter jdRuleFilter = new JdRuleFilter();
 
     /** 一轮投递的结果 */
@@ -122,7 +124,9 @@ public class DeliveryRunner {
             return new RunResult(0, 0, 0);
         }
 
-        jdRuleFilter.reload();
+        // 规则就在当前生效的配置里（jd_rules 段），每轮开始时重新读一次 ——
+        // 所以网页端改完规则、或换了配置文件，下一次点「开始投递」即生效
+        jdRuleFilter.reloadFrom(configFileService.readJdRules());
 
         int delivered = 0;
         int filtered = 0;

@@ -68,7 +68,13 @@ dist/
 browser-data/
 
 # 本地配置（含 API KEY，绝对不能提交；结构与模板见 config/boss.yaml.example）
-config/boss.yaml
+# 用 config/*.yaml 而不是逐个列出：配置页可以新建任意多份配置（不同求职方向各一份），
+# 每一份都可能被填进 API KEY，漏一个就会把它推到远端。
+# JD 过滤规则也在配置文件里（jd_rules 段），所以它同样不会进仓库 ——
+# 想让别人看到你的筛法，就把规则抄进 config/boss.yaml.example。
+config/*.yaml
+# 「当前生效的配置文件」指针，属于本机状态
+config/.active
 
 # Reasonix 会话与工具目录（本地）
 .reasonix/

@@ -2,32 +2,40 @@ package com.getjobs.worker.platform.filter;
 
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
- * JD 规则过滤器：从 {@code jd-rules.txt} 读入多组「词表 + 阈值 + 动作」，对岗位描述做判定。
+ * JD 规则过滤器：把「词表 + 阈值 + 动作」的规则列表编译成判定逻辑，对岗位描述做判定。
  *
- * <p>文件格式（块状，块与块之间用空行分隔；空行与 # 注释忽略）：
+ * <p><b>规则存放在哪</b>：当前生效的配置文件里的 {@code jd_rules} 段（见
+ * {@code ConfigFileService}）。这个类<b>不碰文件</b> —— 规则由调用方读出来再喂进来
+ * （{@link #reloadFrom(List)}），它只负责"解析这段结构 + 判定"。
+ * 早先它自己读一个独立的 {@code jd-rules.yaml}，结果是"配置"和"规则"两个文件
+ * 靠命名约定关联；合并成配置文件里的一段后，这个类顺势把文件 IO 交了出去。
+ *
+ * <p>规则结构（每条一个映射）：
  * <pre>
- * [reject] 明确高门槛 1
- * 仅研究生
- * 需 3 年以上
- *
- * [require] 大数据方向 2
- * Hive
- * Spark
+ * jd_rules:
+ *   - action: reject
+ *     name: 明确高门槛
+ *     threshold: 1
+ *     note: 挡研究生 / 3 年以上 / 非实习岗位
+ *     words: [仅研究生, 硕士研究生及以上, 需 3 年以上]
  * </pre>
- * 规则头语法为 {@code [动作] 名称 阈值}，阈值为可选，省略时按 1 处理。
+ *
+ * <p>各字段：
+ * <ul>
+ *   <li>{@code action} —— 见下表，必填，只认 {@code reject} / {@code require} / {@code warn}</li>
+ *   <li>{@code name} —— 规则名，只用于日志与网页端展示；留空时取动作名</li>
+ *   <li>{@code threshold} —— 命中多少个<b>不同</b>的词才算命中，可选，默认 1，小于 1 按 1 处理</li>
+ *   <li>{@code note} —— 备注，纯给人看，可选（网页端「过滤规则」里就是它那一列）</li>
+ *   <li>{@code words} —— 词表，必填且不能为空（空词表的规则会被跳过并告警）</li>
+ * </ul>
  *
  * <p>三种动作：
  * <ul>
@@ -42,36 +50,28 @@ import java.util.Locale;
  * <p>阈值统计的是「命中了多少个<b>不同的</b>词」——遍历词表时每个词最多计一次，
  * 所以 JD 里把同一个词重复提很多遍不会灌水。
  *
- * <p>关于生效时机与文件占用：{@link #reload()} 在每次投递任务开始时调用，
- * 所以改完文件下次投递即生效，无需重启程序；读文件用一次性读入并立即关闭，
- * 不长期持有句柄；若读取过程抛异常（文件正被其它程序写入/占用等），
- * 会保留上一次成功加载的规则，避免因此整轮不过滤。
- *
- * <p>网页端「配置 → 过滤规则」直接把同一个文件当文本编辑（见
- * {@code JdRuleService}/{@code JdRuleController}）：解析入口 {@link #parseText(List)}
- * 与 {@link #readRuleFile(String)} 是 public static 的，供那条编辑链路复用 ——
- * <b>不</b>改动这里正在生效的规则，改文件的人仍然走 reload() 那条路。
+ * <p><b>解析宽容度</b>：单条规则出错只跳过那一条并给出警告，不影响其它规则 ——
+ * 这段结构是手改和网页改两条路都能改的，一处笔误不该让整套过滤失效。
  */
 @Slf4j
 public class JdRuleFilter {
-
-    /** 规则文件名：优先取工作目录下的同名文件，找不到再取 classpath（src/main/resources） */
-    public static final String DEFAULT_FILE = "jd-rules.txt";
 
     private static final String ACTION_REJECT = "reject";
     private static final String ACTION_REQUIRE = "require";
     private static final String ACTION_WARN = "warn";
 
-    /** 当前生效的规则；reload() 成功后整体替换 */
+    /** 当前生效的规则；reloadFrom() 成功后整体替换 */
     private volatile List<Rule> rules = Collections.emptyList();
-    /** 是否曾经成功加载过（用于区分"读失败，沿用旧规则"和"从没加载过"） */
+    /** 是否曾经加载过（用来区分"从没配过规则"和"配了但被清空"） */
     private volatile boolean everLoaded = false;
 
-    /** 一组规则：动作 + 名称 + 阈值 + 词表 */
+    /** 一组规则：动作 + 名称 + 阈值 + 备注 + 词表 */
     public static final class Rule {
         public final String action;
         public final String name;
         public final int threshold;
+        /** 备注，纯展示用；可为 null */
+        public final String note;
         public final List<String> words;
 
         /** 一行摘要，例如 {@code [reject] 明确高门槛 阈值≥1 · 词 8} */
@@ -79,10 +79,11 @@ public class JdRuleFilter {
             return String.format("[%s] %s 阈值≥%d · 词 %d", action, name, threshold, words.size());
         }
 
-        Rule(String action, String name, int threshold, List<String> words) {
+        public Rule(String action, String name, int threshold, String note, List<String> words) {
             this.action = action;
             this.name = name;
             this.threshold = threshold;
+            this.note = note;
             this.words = words;
         }
     }
@@ -110,49 +111,142 @@ public class JdRuleFilter {
         }
     }
 
-    /** 解析结果：规则列表 + 语法告警（供网页端「保存并校验」回显） */
+    /** 解析结果：规则列表 + 语法告警 */
     public static final class ParseResult {
         public final List<Rule> rules;
         public final List<String> warnings;
 
-        ParseResult(List<Rule> rules, List<String> warnings) {
+        public ParseResult(List<Rule> rules, List<String> warnings) {
             this.rules = rules;
             this.warnings = warnings;
         }
     }
 
+    // ==================================================================
+    // 解析（静态；网页端保存前校验也走这里）
+    // ==================================================================
+
     /**
-     * 重新加载默认规则文件。读失败时保留上一次成功的规则。
+     * 解析规则列表结构。
+     *
+     * <p>逐条容错：某一条不合法只跳过那一条并记一条 warning。
+     * 网页端保存前也用这个方法校验 —— "写进去的"和"读出来的"必须是同一套规则，
+     * 不能两套校验逻辑各说各话。
      */
-    public void reload() {
-        reload(DEFAULT_FILE);
+    public static ParseResult parseRules(List<?> rawRules) {
+        List<String> warnings = new ArrayList<>();
+        List<Rule> parsed = new ArrayList<>();
+
+        if (rawRules == null || rawRules.isEmpty()) {
+            return new ParseResult(parsed, warnings);
+        }
+
+        int index = 0;
+        for (Object item : rawRules) {
+            index++;
+            if (!(item instanceof Map<?, ?> m)) {
+                warnings.add("第 " + index + " 条规则不是映射，已跳过");
+                continue;
+            }
+
+            String action = str(m.get("action")).toLowerCase(Locale.ROOT);
+            if (!isValidAction(action)) {
+                warnings.add("第 " + index + " 条规则的动作「" + action
+                        + "」无效（只支持 " + ACTION_REJECT + "/" + ACTION_REQUIRE + "/" + ACTION_WARN + "），已跳过");
+                continue;
+            }
+
+            String name = str(m.get("name"));
+            if (name.isEmpty()) {
+                name = action;
+            }
+
+            int threshold = 1;
+            Object rawThreshold = m.get("threshold");
+            if (rawThreshold != null) {
+                try {
+                    threshold = Integer.parseInt(str(rawThreshold));
+                } catch (NumberFormatException e) {
+                    warnings.add("第 " + index + " 条规则的阈值「" + rawThreshold + "」不是整数，按 1 处理");
+                    threshold = 1;
+                }
+                if (threshold < 1) {
+                    warnings.add("第 " + index + " 条规则的阈值 " + threshold + " 小于 1，按 1 处理");
+                    threshold = 1;
+                }
+            }
+
+            List<String> words = new ArrayList<>();
+            Object rawWords = m.get("words");
+            if (rawWords instanceof List<?> wordList) {
+                for (Object o : wordList) {
+                    String word = str(o);
+                    if (!word.isEmpty()) {
+                        words.add(word);
+                    }
+                }
+            } else if (rawWords != null) {
+                warnings.add("第 " + index + " 条规则的 words 不是列表，已按空词表处理");
+            }
+            if (words.isEmpty()) {
+                warnings.add("第 " + index + " 条规则「" + name + "」没有任何词，已跳过（空词表没法判定）");
+                continue;
+            }
+
+            parsed.add(new Rule(action, name, threshold, str(m.get("note")), words));
+        }
+
+        return new ParseResult(parsed, warnings);
     }
 
     /**
-     * 重新加载指定规则文件。
+     * 规则对象 → 可直接写进配置文件的映射结构。
+     *
+     * <p>存在的理由：网页端保存时统一走"视图 → 解析校验 → 规范化结构 → 落盘"，
+     * 落盘的永远是解析器认得的那份，不会出现"能存进去、却读不出来"。
      */
-    public synchronized void reload(String fileName) {
-        List<String> lines = readLines(fileName);
-        if (lines == null) {
-            // 读文件抛异常（被占用、正在写入等）：沿用上一次成功的规则，
-            // 不让"临时读不到"变成"这一轮完全不过滤"
-            if (everLoaded) {
-                log.warn("JD 规则文件 {} 读取失败，沿用上一次成功加载的 {} 组规则", fileName, rules.size());
-            } else {
-                log.warn("JD 规则文件 {} 读取失败，本轮不启用 JD 规则过滤", fileName);
+    public static List<Map<String, Object>> toRuleMaps(List<Rule> rules) {
+        List<Map<String, Object>> list = new ArrayList<>();
+        if (rules == null) {
+            return list;
+        }
+        for (Rule r : rules) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("action", r.action);
+            m.put("name", r.name);
+            m.put("threshold", r.threshold);
+            if (r.note != null && !r.note.isBlank()) {
+                // note 为空就不写这一行，免得文件里出现一堆 note: ""
+                m.put("note", r.note);
             }
-            return;
+            m.put("words", r.words);
+            list.add(m);
         }
-        List<String> warnings = new ArrayList<>();
-        List<Rule> parsed = parseLines(lines, warnings);
-        for (String w : warnings) {
-            log.warn("JD 规则文件 {}：{}", fileName, w);
+        return list;
+    }
+
+    // ==================================================================
+    // 加载与判定
+    // ==================================================================
+
+    /**
+     * 用给定的规则结构替换当前生效的规则。
+     *
+     * <p>没有无参重载是刻意的：规则必须由调用方按"当前生效的配置"读出来再喂进来，
+     * 留一个"自己去读某个默认文件"的版本，迟早有人踩到"配置换了、规则还是旧的"。
+     *
+     * @param rawRules 规则列表结构（可为 null / 空，表示这套配置不启用过滤）
+     */
+    public synchronized void reloadFrom(List<?> rawRules) {
+        ParseResult parsed = parseRules(rawRules);
+        for (String w : parsed.warnings) {
+            log.warn("JD 规则：{}", w);
         }
-        this.rules = parsed;
+        this.rules = parsed.rules;
         this.everLoaded = true;
-        log.info("已加载 JD 规则 {}：共 {} 组（reject {} / require {} / warn {}）", fileName,
-                parsed.size(), countByAction(parsed, ACTION_REJECT),
-                countByAction(parsed, ACTION_REQUIRE), countByAction(parsed, ACTION_WARN));
+        log.info("已加载 JD 规则：共 {} 组（reject {} / require {} / warn {}）",
+                parsed.rules.size(), countByAction(parsed.rules, ACTION_REJECT),
+                countByAction(parsed.rules, ACTION_REQUIRE), countByAction(parsed.rules, ACTION_WARN));
     }
 
     /** 当前生效的规则快照（只读展示用，不影响判定） */
@@ -160,31 +254,9 @@ public class JdRuleFilter {
         return List.copyOf(rules);
     }
 
-    /** 是否曾经成功加载过规则文件 */
+    /** 是否曾经加载过规则（即使加载结果是空列表） */
     public boolean hasLoaded() {
         return everLoaded;
-    }
-
-    /** 规则文件在工作目录中的期望路径（文件可能还不存在） */
-    public static Path localFile(String fileName) {
-        return Paths.get(System.getProperty("user.dir"), fileName);
-    }
-
-    /**
-     * 读取规则文件原文（网页端编辑器用）：工作目录优先，classpath 兜底。
-     *
-     * @return 行列表；文件都不存在时为空列表；读取异常时为 null
-     */
-    public static List<String> readRuleFile(String fileName) {
-        return readLines(fileName);
-    }
-
-    /**
-     * 解析给定文本，但<b>不</b>改动当前生效规则 —— 网页端编辑器用它做「保存并校验」。
-     */
-    public static ParseResult parseText(List<String> lines) {
-        List<String> warnings = new ArrayList<>();
-        return new ParseResult(parseLines(lines, warnings), warnings);
     }
 
     /**
@@ -243,107 +315,18 @@ public class JdRuleFilter {
         return hits;
     }
 
-    /**
-     * 读取规则文件内容。
-     *
-     * @return 行列表；文件不存在时返回空列表；读取异常时返回 null（调用方据此沿用旧规则）
-     */
-    private static List<String> readLines(String fileName) {
-        try {
-            Path local = Paths.get(System.getProperty("user.dir"), fileName);
-            if (Files.isRegularFile(local)) {
-                // readAllLines 内部打开并立即关闭，不留文件句柄
-                return Files.readAllLines(local, StandardCharsets.UTF_8);
-            }
-            URL resource = JdRuleFilter.class.getResource("/" + fileName);
-            if (resource != null) {
-                List<String> lines = new ArrayList<>();
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(resource.openStream(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        lines.add(line);
-                    }
-                }
-                return lines;
-            }
-            log.info("未找到 JD 规则文件 {}，本轮不启用 JD 规则过滤", fileName);
-            return Collections.emptyList();
-        } catch (Exception e) {
-            log.warn("读取 JD 规则文件 {} 异常：{}", fileName, e.getMessage());
-            return null;
-        }
+    // ==================================================================
+    // 小工具
+    // ==================================================================
+
+    /** 动作是否合法 */
+    private static boolean isValidAction(String action) {
+        return ACTION_REJECT.equals(action) || ACTION_REQUIRE.equals(action) || ACTION_WARN.equals(action);
     }
 
-    /** 解析块状规则文件；语法问题写进 warnings（调用方决定打日志还是回显给网页端） */
-    private static List<Rule> parseLines(List<String> lines, List<String> warnings) {
-        List<Rule> result = new ArrayList<>();
-        String action = null;
-        String name = null;
-        int threshold = 1;
-        List<String> words = new ArrayList<>();
-
-        for (String raw : lines) {
-            if (raw == null) {
-                continue;
-            }
-            String line = raw.trim();
-            if (line.isEmpty() || line.startsWith("#")) {
-                continue;
-            }
-
-            if (line.startsWith("[")) {
-                flush(result, action, name, threshold, words);
-                words = new ArrayList<>();
-
-                int end = line.indexOf(']');
-                if (end < 0) {
-                    warnings.add("规则头缺少 ']'，该行已跳过：" + line);
-                    action = null;
-                    continue;
-                }
-                String act = line.substring(1, end).trim().toLowerCase(Locale.ROOT);
-                String rest = line.substring(end + 1).trim();
-                String ruleName = rest;
-                int th = 1;
-                int lastSpace = rest.lastIndexOf(' ');
-                if (lastSpace > 0) {
-                    String tail = rest.substring(lastSpace + 1).trim();
-                    try {
-                        th = Integer.parseInt(tail);
-                        ruleName = rest.substring(0, lastSpace).trim();
-                    } catch (NumberFormatException ignore) {
-                        // 最后一段不是数字，说明整串都是名称，阈值用默认值
-                        ruleName = rest;
-                    }
-                }
-                if (th < 1) {
-                    th = 1;
-                }
-
-                if (!ACTION_REJECT.equals(act) && !ACTION_REQUIRE.equals(act) && !ACTION_WARN.equals(act)) {
-                    warnings.add("未知动作 [" + act + "]，只支持 reject/require/warn，该组已跳过");
-                    action = null;
-                    continue;
-                }
-                action = act;
-                name = ruleName.isEmpty() ? act : ruleName;
-                threshold = th;
-            } else if (action != null) {
-                words.add(line);
-            } else {
-                warnings.add("忽略无归属的词「" + line + "」（应写在某个规则头之后）");
-            }
-        }
-        flush(result, action, name, threshold, words);
-        return result;
-    }
-
-    private static void flush(List<Rule> out, String action, String name, int threshold, List<String> words) {
-        if (action == null || words.isEmpty()) {
-            return;
-        }
-        out.add(new Rule(action, name, threshold, new ArrayList<>(words)));
+    /** 取字符串：null → 空串，其余 trim（结构里写成数字/布尔也照样收） */
+    private static String str(Object value) {
+        return value == null ? "" : value.toString().trim();
     }
 
     private static int countByAction(List<Rule> list, String action) {

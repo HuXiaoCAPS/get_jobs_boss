@@ -31,7 +31,7 @@ public class StartupRunner implements ApplicationRunner {
     @Autowired
     private PlaywrightManager playwrightManager;
 
-    /** 读 config/boss.yaml —— 管理页用哪个浏览器就配在那个文件里 */
+    /** 读当前生效的配置文件 —— 管理页用哪个浏览器就配在那个文件里 */
     @Autowired
     private ConfigFileService configFileService;
 
@@ -135,8 +135,7 @@ public class StartupRunner implements ApplicationRunner {
     /**
      * 打开管理页的浏览器。
      *
-     * <p>取值来自 {@code config/boss.yaml} 的 <b>{@code manage_page.browser}</b>
-     * （环境变量 {@code MANAGE_BROWSER} 可临时覆盖），支持三种写法：
+     * <p>取值来自当前生效的配置文件的 <b>{@code manage_page.browser}</b>，支持三种写法：
      * <ul>
      *   <li>{@code default} —— 交给系统默认浏览器</li>
      *   <li>{@code msedge} —— 优先 Microsoft Edge（默认值；自动化本来就用 Edge），找不到再回退默认浏览器</li>
@@ -147,6 +146,10 @@ public class StartupRunner implements ApplicationRunner {
      *
      * <p>为什么不直接用系统默认浏览器：自动化跑的就是 Edge，管理页放 Edge 里，
      * 视觉上只需盯一个浏览器，不用在"默认浏览器"和 Edge 之间来回切。
+     *
+     * <p>以前这里还支持环境变量 {@code MANAGE_BROWSER} 临时覆盖，已经去掉 ——
+     * 这是最后一个靠环境变量配置的开关，留着会让"配置即文件"出现例外，
+     * 排查时也容易忘了环境里还设着它。
      *
      * <p><b>注意</b>：这里打开的是用户日常那个 Edge（只是新开一个标签页）；
      * 自动化用的 Edge 是独立持久化 profile（{@code browser-data/}），<b>两者不共享登录态</b>，
@@ -190,7 +193,7 @@ public class StartupRunner implements ApplicationRunner {
         }
     }
 
-    /** 管理页浏览器配置：写在 config/boss.yaml 的顶层段里，与投递配置同一个文件 */
+    /** 管理页浏览器配置：写在配置文件的顶层段里，与投递配置同一个文件（跟着配置切换一起变） */
     private static final String MANAGE_PAGE_SECTION = "manage_page";
     private static final String MANAGE_PAGE_KEY = "browser";
 
@@ -208,16 +211,10 @@ public class StartupRunner implements ApplicationRunner {
     /**
      * 决定用哪个浏览器打开管理页。
      *
-     * <p>优先级：环境变量 {@code MANAGE_BROWSER}（临时覆盖、不必改文件）
-     * → {@code config/boss.yaml} 的 {@code manage_page.browser}
-     * → 内置默认 {@code msedge}。
+     * <p>优先级：当前生效的配置文件的 {@code manage_page.browser} → 内置默认 {@code msedge}。
+     * 只读配置文件，不再看环境变量。
      */
     private String resolveManageBrowser() {
-        String fromEnv = System.getenv("MANAGE_BROWSER");
-        if (fromEnv != null && !fromEnv.isBlank()) {
-            log.info("管理页浏览器取自环境变量 MANAGE_BROWSER={}", fromEnv.trim());
-            return fromEnv.trim();
-        }
         try {
             Object section = configFileService.read().get(MANAGE_PAGE_SECTION);
             if (section instanceof java.util.Map<?, ?> map) {

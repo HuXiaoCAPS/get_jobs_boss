@@ -84,11 +84,13 @@ HTTP/SSE ─→ PlatformController ─→ PlatformTaskManager ─→ DeliveryRun
 ④ 前端按 `GET /api/platforms` 渲染。
 
 **顺带抽出的平台无关纯逻辑**：`ReplyClassifier`（回复是否算拒绝）、`HrActivity`（HR 活跃度解析）、
-`CityFilter`（省份→城市展开）、`JdRuleFilter`（`jd-rules.txt` 规则，原在 `worker/boss` 包下）。
+`CityFilter`（省份→城市展开）、`JdRuleFilter`（`config/jd-rules*.txt` 规则，原在 `worker/boss` 包下）。
 
 ### 3. 配置外置为文件
 
-`config/boss.yaml` 是配置的**权威来源**（模板见 `config/boss.yaml.example`，不含密钥、可提交）：
+`config/` 下的 YAML 是配置的**权威来源**（默认 `config/boss.yaml`，模板见 `config/boss.yaml.example`，
+不含密钥、可提交）。可以放多份配置（如 `数据开发.yaml`），当前生效的那份记在 `config/.active`；
+网页端「配置 → 配置文件」里可切换 / 新建 / 重命名 / 删除，切换后整页配置项与过滤规则一起换。
 
 ```
 启动 / 每次投递 → syncConfigFromFile()
@@ -142,10 +144,15 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 - **同一家公司不重复投递**：可按 `delivery.skip_delivered_company` 开关（默认开）
 - **停止反馈**：状态里新增 `stopping`，按钮变「正在停止…」，不再像卡死
 - **多值字段兼容全角逗号**（`，`）、顿号、中文分号 —— 手打配置时很容易踩
-- **管理页浏览器可选**：`manage_page.browser`（`msedge` / `default` / 可执行文件路径 / `none`）
-- **`jd-rules.txt` 规则过滤**：`[reject|require|warn] 名称 阈值` 多列表，匹配文本 = 岗位名 + JD 正文 + showSkills；
+- **浏览器内核可选**：`browser.channel`（`msedge` / `chrome` / `chromium`）—— 原先靠环境变量
+  `BROWSER_CHANNEL`，已改到配置文件，环境变量一律不再参与（`MANAGE_BROWSER` 同样去掉）
+- **配置文件可多份并随网页切换**：见上文「配置外置为文件」
+- **`config/jd-rules.txt` 规则过滤**：`[reject|require|warn] 名称 阈值` 多列表，匹配文本 = 岗位名 + JD 正文 + showSkills；
   可在「配置 → 过滤规则」里**直接编辑**（原文进出、不吞注释，保存后回显解析出的规则组与语法告警），
-  改完下一次点「开始投递」即生效，不需要重启
+  改完下一次点「开始投递」即生效，不需要重启；**规则文件跟随当前配置**（`boss.yaml` 用 `jd-rules.txt`，
+  `数据开发.yaml` 用 `jd-rules.数据开发.txt`），重命名 / 删除配置时规则文件一并跟着动
+- **首次无缓存登录不再被弹回登录页**：此前只要探测到一次"未登录"就强制导航到登录页，
+  而扫码成功后页面要连跳几步、检测会短暂误判 —— 现在只在**从未登录过**时才自动引导
 - **遗留数据清理**：启动时幂等删掉上游多平台时代留下的 9 张空表（`job51_*` / `liepin_*` / `zhilian_*`）
   与 `cookie` 表里 3 行遗留记录 —— 免得后来的人猜"哪个表还有用"
 - **死代码清理**：`BossIndustry` 三件套（数据库里根本没有这张表，一调就 SQLException）、
