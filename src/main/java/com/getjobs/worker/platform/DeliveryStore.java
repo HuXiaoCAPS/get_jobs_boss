@@ -1,6 +1,9 @@
 package com.getjobs.worker.platform;
 
 import com.getjobs.worker.platform.model.JobDetail;
+import com.getjobs.worker.platform.model.JobPage;
+import com.getjobs.worker.platform.model.JobQuery;
+import com.getjobs.worker.platform.model.JobStats;
 
 import java.util.Collections;
 import java.util.Map;
@@ -83,6 +86,31 @@ public interface DeliveryStore {
      * @param status {@link #STATUS_DELIVERED} 或 {@link #STATUS_FAILED}
      */
     void updateStatus(String platform, String externalId, String recruiterId, String status);
+
+    // ------------------------------------------------------------------
+    // 数据浏览（网页端「数据」页用）
+    // ------------------------------------------------------------------
+
+    /**
+     * 按条件查岗位列表（分页）。
+     *
+     * <p>返回 {@code null} 表示<b>该平台不支持数据浏览</b>（不是"没有数据"）——
+     * 接口层据此回一句"该平台不支持查看数据"，而不是给前端一个空列表假装正常。
+     * 默认实现就是 null：这类能力要靠平台自己实现（只有它知道自己的数据源能怎么查）。
+     *
+     * <p>分页在平台侧做：数据源各不相同（Boss 是 SQL、假平台是内存），
+     * 怎么高效分页是平台知识。
+     */
+    default JobPage listJobs(String platform, JobQuery query) {
+        return null;
+    }
+
+    /**
+     * 按条件统计岗位数据。返回 {@code null} 的含义同 {@link #listJobs(String, JobQuery)}。
+     */
+    default JobStats jobStats(String platform, JobQuery query) {
+        return null;
+    }
 
     // ------------------------------------------------------------------
     // 聊天页快照（用来算"谁回了我"）

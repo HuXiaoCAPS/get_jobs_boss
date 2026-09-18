@@ -4,11 +4,17 @@ import com.getjobs.application.entity.BossJobDataEntity;
 import com.getjobs.application.service.BossService;
 import com.getjobs.worker.platform.DeliveryStore;
 import com.getjobs.worker.platform.model.JobDetail;
+import com.getjobs.worker.platform.model.JobPage;
+import com.getjobs.worker.platform.model.JobQuery;
+import com.getjobs.worker.platform.model.JobRecord;
+import com.getjobs.worker.platform.model.JobStats;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -185,6 +191,117 @@ public class BossDeliveryStore implements DeliveryStore {
             return;
         }
         bossService.replaceChatSnapshot(snapshot);
+    }
+
+    // ------------------------------------------------------------------
+    // 数据浏览（网页端「数据」页用）
+    //
+    // 这两个方法就是"数据页硬编码"的解药：页面对的是 JobRecord / JobStats 这类
+    // 平台无关模型，走 /api/platforms/{id}/jobs|stats —— 换平台时页面一行都不用改。
+    // Boss 这里只是把通用查询翻译成对 boss_data 的 SQL（复用 BossService 现成的方法），
+    // 再把结果搬进通用模型。
+    // ------------------------------------------------------------------
+
+    @Override
+    public JobPage listJobs(String platform, JobQuery query) {
+        JobQuery q = query == null ? new JobQuery() : query;
+        try {
+            BossService.PagedResult page = bossService.listBossJobs(
+                    q.statuses, q.location, q.experience, q.degree,
+                    q.minK, q.maxK, q.keyword, q.safePage(), q.safeSize(), q.filterHeadhunter,
+                    q.salaryUnit);
+            if (page == null) {
+                return JobPage.of(Collections.emptyList(), 0, q.safePage(), q.safeSize());
+            }
+            List<JobRecord> items = new ArrayList<>();
+            if (page.items != null) {
+                for (BossJobDataEntity e : page.items) {
+                    items.add(toRecord(e));
+                }
+            }
+            return JobPage.of(items, page.total, page.page, page.size);
+        } catch (Exception e) {
+            log.warn("查询岗位列表失败（返回空页）：{}", e.getMessage());
+            return JobPage.of(Collections.emptyList(), 0, q.safePage(), q.safeSize());
+        }
+    }
+
+    @Override
+    public JobStats jobStats(String platform, JobQuery query) {
+        JobQuery q = query == null ? new JobQuery() : query;
+        JobStats out = new JobStats();
+        try {
+            BossService.StatsResponse resp = bossService.getBossStats(
+                    q.statuses, q.location, q.experience, q.degree,
+                    q.minK, q.maxK, q.keyword, q.filterHeadhunter, q.salaryUnit);
+            if (resp == null) {
+                return out;
+            }
+            if (resp.kpi != null) {
+                out.total = resp.kpi.total;
+                out.delivered = resp.kpi.delivered;
+                out.pending = resp.kpi.pending;
+                out.filtered = resp.kpi.filtered;
+                out.failed = resp.kpi.failed;
+                out.avgMonthlyK = resp.kpi.avgMonthlyK;
+                out.avgDailyYuan = resp.kpi.avgDailyYuan;
+            }
+            if (resp.charts != null) {
+                out.salaryBuckets = fromBuckets(resp.charts.salaryBuckets);
+                out.dailySalaryBuckets = fromBuckets(resp.charts.dailySalaryBuckets);
+                out.byStatus = fromNames(resp.charts.byStatus);
+                out.byCity = fromNames(resp.charts.byCity);
+                out.byCompany = fromNames(resp.charts.byCompany);
+                out.byIndustry = fromNames(resp.charts.byIndustry);
+                out.byExperience = fromNames(resp.charts.byExperience);
+                out.byDegree = fromNames(resp.charts.byDegree);
+                out.dailyTrend = fromNames(resp.charts.dailyTrend);
+            }
+        } catch (Exception e) {
+            log.warn("统计岗位数据失败（返回空统计）：{}", e.getMessage());
+        }
+        return out;
+    }
+
+    /** {@code boss_data} 一行 → 平台无关的一条岗位记录 */
+    private static JobRecord toRecord(BossJobDataEntity e) {
+        JobRecord r = new JobRecord();
+        r.id = e.getId();
+        r.jobName = e.getJobName();
+        r.companyName = e.getCompanyName();
+        r.salary = e.getSalary();
+        r.location = e.getLocation();
+        r.experience = e.getExperience();
+        r.degree = e.getDegree();
+        r.hrName = e.getHrName();
+        r.hrPosition = e.getHrPosition();
+        r.hrActiveStatus = e.getHrActiveStatus();
+        r.status = e.getDeliveryStatus();
+        r.note = e.getFilterNote();
+        r.jobUrl = e.getJobUrl();
+        return r;
+    }
+
+    private static List<JobStats.Count> fromNames(List<BossService.NameValue> in) {
+        List<JobStats.Count> out = new ArrayList<>();
+        if (in == null) {
+            return out;
+        }
+        for (BossService.NameValue nv : in) {
+            out.add(new JobStats.Count(nv.name, nv.value));
+        }
+        return out;
+    }
+
+    private static List<JobStats.Count> fromBuckets(List<BossService.BucketValue> in) {
+        List<JobStats.Count> out = new ArrayList<>();
+        if (in == null) {
+            return out;
+        }
+        for (BossService.BucketValue bv : in) {
+            out.add(new JobStats.Count(bv.bucket, bv.value));
+        }
+        return out;
     }
 
     private static Set<String> orEmpty(Set<String> in) {

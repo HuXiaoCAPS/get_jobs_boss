@@ -130,12 +130,20 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 | 页面 | 内容 |
 |---|---|
 | `/deliver` 投递 | 左列平台（来自 `GET /api/platforms`）、右侧开始/停止 + 当次上限、SSE 实时进度 |
-| `/boss` 配置 | 单页配置中心：搜索条件 / 投递行为 / AI 提示词与我的资料 / 通知 / 黑名单 / **过滤规则（JD）** |
-| `/data` 数据 | KPI + 筛选条 + 分页表格（复用 `/api/boss/list` + `/api/boss/stats`） |
+| `/boss` 配置 | 单页配置中心：配置文件（另存为/载入/选择/保存）/ 搜索条件 / 投递行为 / AI 提示词与我的资料 / 通知 / 黑名单 / **过滤规则（JD）** |
+| `/data` 数据 | 平台选择 + KPI + 筛选条 + 分页表格（平台无关：`/api/platforms/{id}/jobs` + `/stats`） |
 | `/appearance` 外观 | 主题、每页条数、表格密度（存 localStorage） |
 
 删掉了上游的 ai-config / env-config / 三个平台页与旧的岗位分析页。
 **平台列表为空时页面显示提示而不是报错** —— 这是"缺平台也能跑"在界面上的体现。
+
+数据页与投递页一样是**按平台渲染**的：它面对 `JobRecord` / `JobStats` 这类平台无关模型，
+真正查询由各平台自己的 `DeliveryStore#listJobs / #jobStats` 实现。
+早先它写死 `/api/boss/list`、`/api/boss/stats` 与「来自 boss_data 表」，
+字段直接对着表结构 —— 那样"加平台"在数据侧等于零支持，
+所谓"预留接入能力"只覆盖了投递链路。平台没实现数据能力时接口返回 **501**
+（而不是空列表），页面据此提示"该平台暂不支持查看数据"。
+`/api/boss/list|stats` 保留为兼容层，上游的 `BossAnalyticsController` 未改动。
 
 ### 7. 其它增强（多为上游已有能力的落地或修复）
 
@@ -147,10 +155,12 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 - **浏览器内核可选**：`browser.channel`（`msedge` / `chrome` / `chromium`）—— 原先靠环境变量
   `BROWSER_CHANNEL`，已改到配置文件，环境变量一律不再参与（`MANAGE_BROWSER` 同样去掉）
 - **配置文件可多份并随网页切换**：见上文「配置外置为文件」
-- **`config/jd-rules.txt` 规则过滤**：`[reject|require|warn] 名称 阈值` 多列表，匹配文本 = 岗位名 + JD 正文 + showSkills；
-  可在「配置 → 过滤规则」里**直接编辑**（原文进出、不吞注释，保存后回显解析出的规则组与语法告警），
-  改完下一次点「开始投递」即生效，不需要重启；**规则文件跟随当前配置**（`boss.yaml` 用 `jd-rules.txt`，
-  `数据开发.yaml` 用 `jd-rules.数据开发.txt`），重命名 / 删除配置时规则文件一并跟着动
+- **JD 过滤规则**：`reject`（命中即拒）/ `require`（必须命中）/ `warn`（只记提示）三类，
+  每条带阈值与备注；匹配文本 = 岗位名 + JD 正文 + showSkills。
+  规则存在**当前配置文件的 `jd_rules` 段**里，网页端「配置 → 过滤规则」按"一条规则"为单位
+  增删改（弹窗表单：动作 / 名称 / 阈值 / 备注 / 词表），改完下一次点「开始投递」即生效，不需重启。
+  因为规则与配置同文件，切换配置天然切换规则，另存为 / 改名 / 删除配置也天然把规则带走 ——
+  不用维护任何"规则文件 ↔ 配置文件"的对应关系
 - **首次无缓存登录不再被弹回登录页**：此前只要探测到一次"未登录"就强制导航到登录页，
   而扫码成功后页面要连跳几步、检测会短暂误判 —— 现在只在**从未登录过**时才自动引导
 - **遗留数据清理**：启动时幂等删掉上游多平台时代留下的 9 张空表（`job51_*` / `liepin_*` / `zhilian_*`）
@@ -158,8 +168,10 @@ Boss 的搜索一次只认一个城市码（这是平台限制，不是实现偷
 - **死代码清理**：`BossIndustry` 三件套（数据库里根本没有这张表，一调就 SQLException）、
   `/api/boss/execute`、`/api/boss/stream` 及配套的旧版 SSE 桥接（进度统一走 `/api/platforms/{id}/stream`）
 - **API 形状**：新增 `/api/platforms`（列表）、`/api/platforms/{id}/{start,stop,status,stream}`、
-  `/api/boss/jd-rules`（读写过滤规则）；`/api/boss/{start,stop,status,logout}` 保留为管理页兼容层
-  （登录态与退出登录是 Boss 特有的，平台无关层表达不了）
+  `/api/platforms/{id}/{jobs,stats}`（岗位数据浏览，平台无关模型）、`/api/boss/jd-rules`（读写过滤规则）、
+  `/api/boss/config-files`（多份配置的列出/切换/另存为/载入/改名/删除）；
+  `/api/boss/{start,stop,status,logout}` 与 `/api/boss/{list,stats}` 保留为兼容层
+  （登录态、退出登录是 Boss 特有的，平台无关层表达不了）
 
 ---
 

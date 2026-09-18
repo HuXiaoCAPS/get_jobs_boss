@@ -118,17 +118,7 @@ public class BossConfig {
     private Boolean sendImgResume;
 
     /**
-     * 目标薪资
-     */
-    private List<Integer> expectedSalary;
-
-    /**
      * 等待时间
      */
     private String waitTime;
-
-    /**
-     * HR未上线状态
-     */
-    private List<String> deadStatus;
 }
