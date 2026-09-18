@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { API_BASE } from '@/lib/api'
+import JdRulesSection from '@/app/components/JdRulesSection'
 
 /**
  * 配置页（单页极简版）
@@ -17,6 +18,8 @@ import { API_BASE } from '@/lib/api'
  *   - API 地址 / API Key / 模型**不在这里改**（只允许编辑 config/boss.yaml），
  *     因为网页端是明文输入框，容易泄露；改了文件后启动/投递前会自动同步到库
  *   - 城市是逗号分隔的输入框：能表达多城市（深圳,广州），留空 = 不限
+ *   - 过滤规则（项目根目录 jd-rules.txt）由下面的 <JdRulesSection /> 独立编辑与保存，
+ *     与这里的「保存」（写 config/boss.yaml）互不影响
  */
 
 type Option = { name: string; code: string }
@@ -385,6 +388,9 @@ export default function BossPage() {
           <Bool value={form.debugger} onChange={(v) => set('debugger', v)} />
         </Row>
       </Section>
+
+      {/* 过滤规则：直接编辑项目根目录的 jd-rules.txt（与上面写 boss.yaml 的「保存」互不影响） */}
+      <JdRulesSection />
 
       <Section title="AI 提示词与我的资料" hint="AI 生成招呼语时用它们了解你，并决定说什么（保存进 config/boss.yaml 的 ai 块）">
         <Row label="我的资料" hint="技能、经验、技术栈、项目经历……写得越具体，生成的话术越贴合">

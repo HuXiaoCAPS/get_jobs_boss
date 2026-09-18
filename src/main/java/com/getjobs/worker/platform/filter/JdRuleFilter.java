@@ -46,6 +46,11 @@ import java.util.Locale;
  * 所以改完文件下次投递即生效，无需重启程序；读文件用一次性读入并立即关闭，
  * 不长期持有句柄；若读取过程抛异常（文件正被其它程序写入/占用等），
  * 会保留上一次成功加载的规则，避免因此整轮不过滤。
+ *
+ * <p>网页端「配置 → 过滤规则」直接把同一个文件当文本编辑（见
+ * {@code JdRuleService}/{@code JdRuleController}）：解析入口 {@link #parseText(List)}
+ * 与 {@link #readRuleFile(String)} 是 public static 的，供那条编辑链路复用 ——
+ * <b>不</b>改动这里正在生效的规则，改文件的人仍然走 reload() 那条路。
  */
 @Slf4j
 public class JdRuleFilter {
@@ -68,6 +73,11 @@ public class JdRuleFilter {
         public final String name;
         public final int threshold;
         public final List<String> words;
+
+        /** 一行摘要，例如 {@code [reject] 明确高门槛 阈值≥1 · 词 8} */
+        public String describe() {
+            return String.format("[%s] %s 阈值≥%d · 词 %d", action, name, threshold, words.size());
+        }
 
         Rule(String action, String name, int threshold, List<String> words) {
             this.action = action;
@@ -100,6 +110,17 @@ public class JdRuleFilter {
         }
     }
 
+    /** 解析结果：规则列表 + 语法告警（供网页端「保存并校验」回显） */
+    public static final class ParseResult {
+        public final List<Rule> rules;
+        public final List<String> warnings;
+
+        ParseResult(List<Rule> rules, List<String> warnings) {
+            this.rules = rules;
+            this.warnings = warnings;
+        }
+    }
+
     /**
      * 重新加载默认规则文件。读失败时保留上一次成功的规则。
      */
@@ -122,12 +143,48 @@ public class JdRuleFilter {
             }
             return;
         }
-        List<Rule> parsed = parse(lines);
+        List<String> warnings = new ArrayList<>();
+        List<Rule> parsed = parseLines(lines, warnings);
+        for (String w : warnings) {
+            log.warn("JD 规则文件 {}：{}", fileName, w);
+        }
         this.rules = parsed;
         this.everLoaded = true;
         log.info("已加载 JD 规则 {}：共 {} 组（reject {} / require {} / warn {}）", fileName,
                 parsed.size(), countByAction(parsed, ACTION_REJECT),
                 countByAction(parsed, ACTION_REQUIRE), countByAction(parsed, ACTION_WARN));
+    }
+
+    /** 当前生效的规则快照（只读展示用，不影响判定） */
+    public List<Rule> snapshot() {
+        return List.copyOf(rules);
+    }
+
+    /** 是否曾经成功加载过规则文件 */
+    public boolean hasLoaded() {
+        return everLoaded;
+    }
+
+    /** 规则文件在工作目录中的期望路径（文件可能还不存在） */
+    public static Path localFile(String fileName) {
+        return Paths.get(System.getProperty("user.dir"), fileName);
+    }
+
+    /**
+     * 读取规则文件原文（网页端编辑器用）：工作目录优先，classpath 兜底。
+     *
+     * @return 行列表；文件都不存在时为空列表；读取异常时为 null
+     */
+    public static List<String> readRuleFile(String fileName) {
+        return readLines(fileName);
+    }
+
+    /**
+     * 解析给定文本，但<b>不</b>改动当前生效规则 —— 网页端编辑器用它做「保存并校验」。
+     */
+    public static ParseResult parseText(List<String> lines) {
+        List<String> warnings = new ArrayList<>();
+        return new ParseResult(parseLines(lines, warnings), warnings);
     }
 
     /**
@@ -191,7 +248,7 @@ public class JdRuleFilter {
      *
      * @return 行列表；文件不存在时返回空列表；读取异常时返回 null（调用方据此沿用旧规则）
      */
-    private List<String> readLines(String fileName) {
+    private static List<String> readLines(String fileName) {
         try {
             Path local = Paths.get(System.getProperty("user.dir"), fileName);
             if (Files.isRegularFile(local)) {
@@ -218,8 +275,8 @@ public class JdRuleFilter {
         }
     }
 
-    /** 解析块状规则文件 */
-    private List<Rule> parse(List<String> lines) {
+    /** 解析块状规则文件；语法问题写进 warnings（调用方决定打日志还是回显给网页端） */
+    private static List<Rule> parseLines(List<String> lines, List<String> warnings) {
         List<Rule> result = new ArrayList<>();
         String action = null;
         String name = null;
@@ -241,7 +298,7 @@ public class JdRuleFilter {
 
                 int end = line.indexOf(']');
                 if (end < 0) {
-                    log.warn("JD 规则文件：规则头缺少 ']'，已跳过该行：{}", line);
+                    warnings.add("规则头缺少 ']'，该行已跳过：" + line);
                     action = null;
                     continue;
                 }
@@ -265,7 +322,7 @@ public class JdRuleFilter {
                 }
 
                 if (!ACTION_REJECT.equals(act) && !ACTION_REQUIRE.equals(act) && !ACTION_WARN.equals(act)) {
-                    log.warn("JD 规则文件：未知动作 [{}]，支持 reject/require/warn，该组已跳过", act);
+                    warnings.add("未知动作 [" + act + "]，只支持 reject/require/warn，该组已跳过");
                     action = null;
                     continue;
                 }
@@ -275,21 +332,21 @@ public class JdRuleFilter {
             } else if (action != null) {
                 words.add(line);
             } else {
-                log.debug("JD 规则文件：忽略无归属的词「{}」（应写在某个规则头之后）", line);
+                warnings.add("忽略无归属的词「" + line + "」（应写在某个规则头之后）");
             }
         }
         flush(result, action, name, threshold, words);
         return result;
     }
 
-    private void flush(List<Rule> out, String action, String name, int threshold, List<String> words) {
+    private static void flush(List<Rule> out, String action, String name, int threshold, List<String> words) {
         if (action == null || words.isEmpty()) {
             return;
         }
         out.add(new Rule(action, name, threshold, new ArrayList<>(words)));
     }
 
-    private int countByAction(List<Rule> list, String action) {
+    private static int countByAction(List<Rule> list, String action) {
         int n = 0;
         for (Rule rule : list) {
             if (action.equals(rule.action)) {

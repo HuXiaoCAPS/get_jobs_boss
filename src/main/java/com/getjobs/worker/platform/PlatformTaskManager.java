@@ -13,7 +13,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.function.BiConsumer;
 
 /**
  * 平台任务壳 —— 管"某个平台现在是不是在跑"，并把进度推给前端。
@@ -36,8 +35,6 @@ public class PlatformTaskManager {
     private final ConcurrentMap<String, TaskState> tasks = new ConcurrentHashMap<>();
     /** 平台 id -> SSE 订阅者 */
     private final ConcurrentMap<String, List<SseEmitter>> subscribers = new ConcurrentHashMap<>();
-    /** 进程内的进度监听器（供旧接口桥接，见 broadcast 的说明） */
-    private final List<BiConsumer<String, JobProgressMessage>> progressListeners = new CopyOnWriteArrayList<>();
 
     /** 停止指令发出后，等待任务自行退出的宽限时间（超过就强制复位状态，让界面能重开） */
     private static final long FORCE_RESET_GRACE_MS = 15_000L;
@@ -218,19 +215,6 @@ public class PlatformTaskManager {
         return emitter;
     }
 
-    /**
-     * 注册一个"进程内进度监听器"。
-     *
-     * <p>用途：旧的 {@code /api/boss/stream} 要把进度转发给老前端，而那条 SSE 通道
-     * 由 BossController 自己维护（含心跳）。有了这个钩子，进度只需从一处产生（本类），
-     * 两道 SSE 通道都能收到，不用把广播逻辑抄两份。
-     */
-    public void addProgressListener(BiConsumer<String, JobProgressMessage> listener) {
-        if (listener != null) {
-            progressListeners.add(listener);
-        }
-    }
-
     private void removeSubscriber(String platformId, SseEmitter emitter) {
         List<SseEmitter> list = subscribers.get(platformId);
         if (list != null) {
@@ -242,14 +226,6 @@ public class PlatformTaskManager {
     private void broadcast(String platformId, JobProgressMessage message) {
         if (message == null) {
             return;
-        }
-        // 先通知"进程内监听器"（例如 BossController 的旧版 /api/boss/stream 桥接）
-        for (BiConsumer<String, JobProgressMessage> listener : progressListeners) {
-            try {
-                listener.accept(platformId, message);
-            } catch (Exception e) {
-                log.debug("进度监听器异常：{}", e.getMessage());
-            }
         }
         List<SseEmitter> list = subscribers.get(platformId);
         if (list == null || list.isEmpty()) {

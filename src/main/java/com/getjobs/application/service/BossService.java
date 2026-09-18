@@ -5,13 +5,11 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.StringUtils;
 import com.getjobs.application.entity.BlacklistEntity;
 import com.getjobs.application.entity.BossConfigEntity;
-import com.getjobs.application.entity.BossIndustryEntity;
 import com.getjobs.application.entity.BossOptionEntity;
 import com.getjobs.application.mapper.BlacklistMapper;
 import com.getjobs.application.mapper.BossJobDataMapper;
 import com.getjobs.application.entity.BossJobDataEntity;
 import com.getjobs.application.mapper.BossConfigMapper;
-import com.getjobs.application.mapper.BossIndustryMapper;
 import com.getjobs.application.mapper.BossOptionMapper;
 import com.getjobs.worker.boss.BossConfig;
 import jakarta.annotation.PostConstruct;
@@ -44,7 +42,6 @@ import java.util.regex.Pattern;
 public class BossService {
 
     private final BossOptionMapper bossOptionMapper;
-    private final BossIndustryMapper bossIndustryMapper;
     private final BossConfigMapper bossConfigMapper;
     private final BlacklistMapper blacklistMapper;
     private final BossJobDataMapper bossJobDataMapper;
@@ -156,33 +153,6 @@ public class BossService {
         wrapper.eq("name", name);
         BossOptionEntity entity = bossOptionMapper.selectOne(wrapper);
         return entity != null ? entity.getCode() : "0";
-    }
-
-    // ==================== Industry相关方法 ====================
-
-    /**
-     * 获取所有行业
-     */
-    public List<BossIndustryEntity> getAllIndustries() {
-        return bossIndustryMapper.selectList(null);
-    }
-
-    /**
-     * 根据代码获取行业
-     */
-    public BossIndustryEntity getIndustryByCode(Integer code) {
-        return bossIndustryMapper.selectById(code);
-    }
-
-    /**
-     * 根据行业名称获取代码
-     * 如果找不到，返回默认值 "0"
-     */
-    public String getIndustryCodeByName(String name) {
-        QueryWrapper<BossIndustryEntity> wrapper = new QueryWrapper<>();
-        wrapper.eq("name", name);
-        BossIndustryEntity entity = bossIndustryMapper.selectOne(wrapper);
-        return entity != null ? String.valueOf(entity.getCode()) : "0";
     }
 
     // ==================== BossConfig相关方法 ====================
