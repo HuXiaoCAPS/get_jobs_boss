@@ -4,7 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.getjobs.application.service.CookieService;
 import com.getjobs.worker.dto.JobProgressMessage;
 import com.getjobs.worker.manager.PlaywrightManager;
-import com.getjobs.worker.service.BossJobService;
+import com.getjobs.worker.platform.PlatformTaskManager;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.catalina.connector.ClientAbortException;
@@ -19,11 +20,17 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Boss 平台控制器（单平台合并版）：进度 SSE 与任务接口
+ * Boss 平台控制器：管理页用的旧接口（{@code /api/boss/*}）。
+ *
+ * <p><b>底层已经走平台无关的任务壳</b>（{@link PlatformTaskManager}）：启动/停止/状态都不再
+ * 由 Boss 专属的 JobService 处理，而是统一交给任务壳 + {@code DeliveryRunner}。
+ * 保留这些路径只是为了不让旧管理页（已构建进 dist）的按钮失效 —— 新前端请用
+ * {@code /api/platforms/{id}/*}。
+ *
+ * <p>登录态与退出登录仍然是 Boss 特有的，留在这里。
  */
 @Slf4j
 @RestController
@@ -31,13 +38,36 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @CrossOrigin(origins = "*")
 @RequiredArgsConstructor
 public class BossController {
+
+    /** 与管理页 / 前端约定的平台 id（本控制器只管 Boss） */
+    private static final String PLATFORM = "boss";
+
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
-    private final BossJobService bossJobService;
+    private final PlatformTaskManager taskManager;
     private final PlaywrightManager playwrightManager;
     private final CookieService cookieService;
 
+    /** 旧版进度 SSE 的订阅者（含心跳，见 heartbeatBossProgress） */
     private final List<SseEmitter> bossProgressEmitters = new CopyOnWriteArrayList<>();
+
+    /**
+     * 把任务壳产生的进度转发到旧的 SSE 通道。
+     *
+     * <p>这样进度只在任务壳一处产生，两条 SSE（旧的 {@code /api/boss/stream}
+     * 与新的 {@code /api/platforms/{id}/stream}）都能收到，不用抄两份广播逻辑。
+     */
+    @PostConstruct
+    void bridgeProgress() {
+        taskManager.addProgressListener((platformId, message) -> {
+            if (PLATFORM.equals(platformId)) {
+                if (message != null && message.getMessage() != null) {
+                    log.info("[{}] {}", platformId, message.getMessage());
+                }
+                sendBossProgress(message);
+            }
+        });
+    }
 
     /** SSE - Boss投递任务进度推送 */
     @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -66,49 +96,35 @@ public class BossController {
         return emitter;
     }
 
-    /** POST - 启动Boss投递任务 */
+    /** POST - 启动Boss投递任务（旧路径，等价于 /start） */
     @PostMapping("/execute")
     public ResponseEntity<Map<String, Object>> executeBoss() {
-        if (bossJobService.isRunning()) {
-            return ResponseEntity.ok(Map.of(
-                    "status", "already_running",
-                    "message", "Boss投递任务已在运行中"
-            ));
+        Map<String, Object> result = taskManager.start(PLATFORM, 0);
+        if (Boolean.TRUE.equals(result.get("success"))) {
+            return ResponseEntity.ok(Map.of("status", "started", "message", result.get("message")));
         }
-
-        CompletableFuture.runAsync(() -> bossJobService.executeDelivery(this::sendBossProgress));
-
-        return ResponseEntity.ok(Map.of(
-                "status", "started",
-                "message", "Boss投递任务已启动"
-        ));
+        return ResponseEntity.ok(Map.of("status", "already_running", "message", result.get("message")));
     }
 
-    /** POST - 启动Boss投递任务（前端使用的接口）*/
+    /** POST - 启动Boss投递任务（管理页使用的接口） */
     @PostMapping("/start")
-    public ResponseEntity<Map<String, Object>> startBoss() {
+    public ResponseEntity<Map<String, Object>> startBoss(
+            @RequestParam(value = "max", defaultValue = "0") int max) {
         Map<String, Object> response = new HashMap<>();
         try {
-            if (!playwrightManager.isLoggedIn("boss")) {
+            if (!playwrightManager.isLoggedIn(PLATFORM)) {
                 response.put("success", false);
                 response.put("message", "请先登录Boss直聘");
                 response.put("status", "not_logged_in");
                 return ResponseEntity.badRequest().body(response);
             }
-            if (bossJobService.isRunning()) {
-                long seconds = bossJobService.runningForMillis() / 1000;
+            Map<String, Object> result = taskManager.start(PLATFORM, max);
+            if (!Boolean.TRUE.equals(result.get("success"))) {
                 response.put("success", false);
-                response.put("message", String.format(
-                        "Boss任务已在运行中（已运行 %d 分 %d 秒）。如果长时间没有进展，先点\"停止投递\"再重新开始",
-                        seconds / 60, seconds % 60));
+                response.put("message", result.get("message"));
                 response.put("status", "running");
-                response.put("runningSeconds", seconds);
                 return ResponseEntity.badRequest().body(response);
             }
-            CompletableFuture.runAsync(() -> bossJobService.executeDelivery(pm -> {
-                sendBossProgress(pm);
-                log.info("[{}] {}", pm.getPlatform(), pm.getMessage());
-            }));
             response.put("success", true);
             response.put("message", "Boss任务启动成功");
             response.put("status", "started");
@@ -128,12 +144,12 @@ public class BossController {
     public ResponseEntity<Map<String, Object>> stopBoss() {
         Map<String, Object> response = new HashMap<>();
         try {
-            if (!bossJobService.isRunning()) {
+            Map<String, Object> result = taskManager.stop(PLATFORM);
+            if (!Boolean.TRUE.equals(result.get("success"))) {
                 response.put("success", false);
-                response.put("message", "没有正在运行的Boss任务");
+                response.put("message", result.get("message"));
                 return ResponseEntity.badRequest().body(response);
             }
-            bossJobService.stopDelivery();
             response.put("success", true);
             response.put("message", "Boss任务停止请求已发送");
             log.info("通过API停止Boss任务");
@@ -151,12 +167,12 @@ public class BossController {
     public ResponseEntity<Map<String, Object>> logoutBoss() {
         Map<String, Object> response = new HashMap<>();
         try {
-            playwrightManager.setLoginStatus("boss", false);
-            cookieService.clearCookieByPlatform("boss", "manual logout");
-            try { 
-                playwrightManager.clearBossCookies(); 
-            } catch (Exception e) { 
-                log.warn("清理Boss上下文Cookie异常: {}", e.getMessage()); 
+            playwrightManager.setLoginStatus(PLATFORM, false);
+            cookieService.clearCookieByPlatform(PLATFORM, "manual logout");
+            try {
+                playwrightManager.clearBossCookies();
+            } catch (Exception e) {
+                log.warn("清理Boss上下文Cookie异常: {}", e.getMessage());
             }
             response.put("success", true);
             response.put("message", "Boss已退出登录，数据库Cookie和上下文Cookie均已清理");
@@ -169,10 +185,12 @@ public class BossController {
         }
     }
 
-    /** GET - 获取Boss任务状态 */
+    /** GET - 获取Boss任务状态（管理页用；含登录态） */
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> getBossStatus() {
-        return ResponseEntity.ok(bossJobService.getStatus());
+        Map<String, Object> status = new HashMap<>(taskManager.status(PLATFORM));
+        status.put("isLoggedIn", playwrightManager.isLoggedIn(PLATFORM));
+        return ResponseEntity.ok(status);
     }
 
     private void sendBossProgress(JobProgressMessage message) {

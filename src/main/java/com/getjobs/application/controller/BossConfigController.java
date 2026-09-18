@@ -71,10 +71,25 @@ public class BossConfigController {
         config.setKeywords(normalizeKeywords(config.getKeywords()));
 
         // 将前端可能传来的『代码列表』转换并保存成『中文名称列表/值』
-        // 城市：保存中文名（单值）
-        if (config.getCityCode() != null) {
-            String cityName = bossService.normalizeCityToName(config.getCityCode());
-            config.setCityCode(cityName);
+        // 城市：网页端现在是逗号分隔的输入框，能表达多城市（如 "深圳,广州"）。
+        //   这里统一归一化成『城市中文名的括号列表』（单城市就是该名字，如 "不限"）：
+        //     - 接受 code / 中文名 / "深圳,广州" / "[深圳,广州]"（见 normalizeCityToName）
+        //     - 「不限」是"全选"，与具体城市混在一起时会被丢掉
+        //   空值 = 不改动该字段，避免"前端没带 cityCode 就把城市清空"。
+        //   （下游 loadBossConfig 会把中文名转成 code，「不限」再由 Boss.buildSearchUrl
+        //    映射成 boss 的全国码 100010000）
+        if (config.getCityCode() != null && !config.getCityCode().trim().isEmpty()) {
+            config.setCityCode(bossService.normalizeCityToName(config.getCityCode()));
+        } else {
+            config.setCityCode(null);
+        }
+        // 排除的城市/省份：与城市相反 —— **空字符串表示"清空排除表"**（用户把内容删掉就是要取消排除），
+        // null 才是"本次不改动"。只做去空白与统一分隔符，不做 code 转换（省份名要留给 CityFilter 展开）。
+        if (config.getCityExclude() != null) {
+            String raw = config.getCityExclude().trim();
+            config.setCityExclude(raw.isEmpty()
+                    ? ""
+                    : bossService.toBracketListString(bossService.parseListString(raw)));
         }
         // 其它多选：保存为中文名称的括号列表
         if (config.getIndustry() != null) {
@@ -113,6 +128,11 @@ public class BossConfigController {
                         : config.getJobType());
             config.setJobType(name);
         }
+
+        // 写进 config/boss.yaml（配置的权威来源）。
+        // 这一步必须在返回前做——否则下次投递时 syncConfigFromFile() 会用旧文件把这次修改覆盖回去。
+        // saveConfigToFile 内部写完文件会立刻回写库，所以下面的库更新只是保持原有的返回值语义。
+        bossService.saveConfigToFile(config);
 
         // 为避免每次新增导致错乱：当ID缺失时也执行“选择性更新第一条”策略
         // 若存在ID，按ID更新；否则更新首条记录（若不存在则插入）

@@ -47,6 +47,25 @@ public class BossConfigEntity {
     private Integer sendImgResume;
     /** 是否过滤不在线HR（1=启用，0=关闭） */
     private Integer filterDeadHr;
+    /** HR 活跃度阈值（天）：活跃描述解析出的天数超过它就不投；0=不启用细粒度判定，null 按 30 天 */
+    private Integer hrActiveMaxDays;
+    /**
+     * 多城市处理方式：
+     * 1（或 null 以外的真值）= 过滤模式 —— 搜索时用全国码，再按岗位自身的城市筛选；
+     * 0 / null = 轮换模式（原行为）—— 对每个城市各搜一轮。
+     */
+    private Integer cityFilterMode;
+    /**
+     * 排除的城市/省份（逗号或括号列表）。命中即跳过，优先级高于 cityCode。
+     * <p>写省份名会按内置的「省份 → 城市」映射展开（例如「广东」= 广州/深圳/东莞…），
+     * 省得逐个城市枚举。</p>
+     */
+    private String cityExclude;
+    /**
+     * 同一家公司不重复投递（1=开启，0=关闭）。null 视为开启。
+     * 公司名下任何一个岗位投过之后，它其余岗位一律跳过。
+     */
+    private Integer skipDeliveredCompany;
     /** HR不在线状态列表（逗号或括号列表） */
     private String deadStatus;
     /** 创建时间 */

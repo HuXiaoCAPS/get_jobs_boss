@@ -23,7 +23,7 @@ public class CookieEntity {
     private Long id;
 
     /**
-     * 平台名称（boss/zhilian/job51/liepin）
+     * 平台名称（boss）
      */
     @TableField("platform")
     private String platform;

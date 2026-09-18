@@ -53,7 +53,7 @@ public class CookieService {
 
     /**
      * 根据平台获取Cookie
-     * @param platform 平台名称（boss/zhilian/job51/liepin）
+     * @param platform 平台名称（boss）
      * @return Cookie实体
      */
     public CookieEntity getCookieByPlatform(String platform) {

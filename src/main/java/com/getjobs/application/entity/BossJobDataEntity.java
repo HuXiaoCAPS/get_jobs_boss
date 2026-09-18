@@ -56,6 +56,10 @@ public class BossJobDataEntity {
     @TableField("job_description")
     private String jobDescription;
 
+    /** warn 类 JD 规则命中的提示（可谈项），由 JdRuleFilter 判定后写入；无命中为 null */
+    @TableField("filter_note")
+    private String filterNote;
+
     @TableField("job_url")
     private String jobUrl;
 

@@ -119,14 +119,19 @@ public class AiService {
                 int promptTokens = usageObject != null ? usageObject.optInt("prompt_tokens", -1) : -1;
                 int completionTokens = usageObject != null ? usageObject.optInt("completion_tokens", -1) : -1;
                 int totalTokens = usageObject != null ? usageObject.optInt("total_tokens", -1) : -1;
+                // 前缀缓存命中情况：命中部分单价约为未命中的 1/50，
+                // 前缀稳定（prompt 固定开场 + introduce）才命中；字段缺失时为 -1
+                int cacheHitTokens = usageObject != null ? usageObject.optInt("prompt_cache_hit_tokens", -1) : -1;
+                int cacheMissTokens = usageObject != null ? usageObject.optInt("prompt_cache_miss_tokens", -1) : -1;
 
                 LocalDateTime createdTime = created > 0
                         ? Instant.ofEpochSecond(created).atZone(ZoneId.systemDefault()).toLocalDateTime()
                         : LocalDateTime.now();
                 DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-                log.info("AI响应: id={}, time={}, model={}, promptTokens={}, completionTokens={}, totalTokens={}",
-                        requestId, createdTime.format(formatter), usedModel, promptTokens, completionTokens, totalTokens);
+                String cacheDesc = describeCacheHit(cacheHitTokens, cacheMissTokens);
+                log.info("AI响应: id={}, time={}, model={}, promptTokens={}, completionTokens={}, totalTokens={}, 缓存命中={}",
+                        requestId, createdTime.format(formatter), usedModel, promptTokens, completionTokens, totalTokens, cacheDesc);
 
                 return responseContent;
             } else {
@@ -144,6 +149,22 @@ public class AiService {
             log.error("调用AI服务异常", e);
             throw e instanceof RuntimeException ? (RuntimeException) e : new RuntimeException(e);
         }
+    }
+
+    /**
+     * 把前缀缓存命中情况格式化成"命中数/总数(百分比)"，字段缺失时返回 n/a。
+     * DeepSeek 的前缀缓存命中部分单价约为未命中的 1/50，这个比例直接反映省了多少钱；
+     * 命中率偏低通常说明 prompt 前缀不稳定（比如把每次都变的内容放在了最前面）。
+     */
+    private String describeCacheHit(int cacheHitTokens, int cacheMissTokens) {
+        if (cacheHitTokens < 0 || cacheMissTokens < 0) {
+            return "n/a";
+        }
+        int total = cacheHitTokens + cacheMissTokens;
+        if (total == 0) {
+            return "0/0(0.0%)";
+        }
+        return String.format("%d/%d(%.1f%%)", cacheHitTokens, total, cacheHitTokens * 100.0 / total);
     }
 
     private String normalizeBaseUrl(String baseUrl) {

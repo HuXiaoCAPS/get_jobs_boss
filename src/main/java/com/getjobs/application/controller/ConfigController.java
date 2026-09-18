@@ -1,5 +1,6 @@
 package com.getjobs.application.controller;
 
+import com.getjobs.application.service.BossService;
 import com.getjobs.application.service.ConfigService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +22,9 @@ public class ConfigController {
 
     @Autowired
     private ConfigService configService;
+
+    @Autowired
+    private BossService bossService;
 
     /**
      * 获取所有配置
@@ -96,6 +100,13 @@ public class ConfigController {
 
             int updateCount = configService.batchUpdateConfigs(configMap);
 
+            // 通知相关的键同样要落进 config/boss.yaml —— 配置以文件为权威，
+            // 只在网页端改库的话，下次 syncConfigFromFile() 会用文件里的旧值覆盖回去。
+            // （BASE_URL / API_KEY / MODEL 刻意不在这里回写：它们只允许在配置文件里改）
+            if (configMap.containsKey("HOOK_URL") || configMap.containsKey("BOT_IS_SEND")) {
+                bossService.saveAiAndNotifyToFile(null, null, configMap.get("HOOK_URL"), configMap.get("BOT_IS_SEND"));
+            }
+
             response.put("success", true);
             response.put("message", "配置更新成功");
             response.put("updateCount", updateCount);
@@ -134,6 +145,14 @@ public class ConfigController {
             }
 
             boolean success = configService.updateConfig(key, value);
+
+            // 与批量更新同样的理由：通知相关的键要同步写回 config/boss.yaml
+            if ("HOOK_URL".equals(key) || "BOT_IS_SEND".equals(key)) {
+                bossService.saveAiAndNotifyToFile(
+                        null, null,
+                        "HOOK_URL".equals(key) ? value : null,
+                        "BOT_IS_SEND".equals(key) ? value : null);
+            }
 
             if (success) {
                 response.put("success", true);

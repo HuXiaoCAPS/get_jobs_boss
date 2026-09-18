@@ -14,6 +14,7 @@ import com.getjobs.application.mapper.BossConfigMapper;
 import com.getjobs.application.mapper.BossIndustryMapper;
 import com.getjobs.application.mapper.BossOptionMapper;
 import com.getjobs.worker.boss.BossConfig;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -48,6 +49,35 @@ public class BossService {
     private final BlacklistMapper blacklistMapper;
     private final BossJobDataMapper bossJobDataMapper;
     private final javax.sql.DataSource dataSource;
+    /** config/boss.yaml 的读写（配置以文件为权威来源，见 syncConfigFromFile） */
+    private final ConfigFileService configFileService;
+
+    /**
+     * 启动时就把表结构补齐（补列 / 建表 / 列顺序迁移）。
+     * <p>
+     * 必须放在启动阶段：之前只在投递时（prepare）才做，于是存在一个窗口期——
+     * 实体加了字段、列却还没建，此时任何查这张表的接口都会 500。实测踩过：
+     * 给 BossConfigEntity 加 hrActiveMaxDays 后，/api/boss/config 直接报
+     * no such column: hr_active_max_days，前端所有下拉框一起空掉。
+     */
+    @PostConstruct
+    public void initSchema() {
+        try {
+            ensureBossDataColumnOrder();
+        } catch (Exception e) {
+            log.warn("启动时确保表结构失败（不影响启动，投递前还会再试一次）：{}", e.getMessage());
+        }
+        // 启动时同步一次配置：
+        //   - config/boss.yaml 不存在而库里有配置 → 把库里的导出成文件（首次迁移）
+        //   - 存在 → 把文件的值回写库
+        // 必须放在启动阶段，否则"配置文件"要等到第一次点投递才出现
+        //（loadBossConfig 只在投递流程里被调用）。
+        try {
+            syncConfigFromFile();
+        } catch (Exception e) {
+            log.warn("启动时同步 config/boss.yaml 失败（投递前还会再试一次）：{}", e.getMessage());
+        }
+    }
 
     // ==================== Option相关方法 ====================
 
@@ -254,10 +284,376 @@ public class BossService {
     // ==================== 配置加载方法 ====================
 
     /**
+     * 配置文件与数据库之间的同步（配置以 config/boss.yaml 为权威来源）。
+     *
+     * <p><b>首次迁移</b>：YAML 不存在、而库里有配置 → 把库里的导出成 YAML。
+     * <p><b>日常</b>：YAML 存在 → 把它的值写回 boss_config / ai / config 三张表。
+     *
+     * <p>为什么绕一圈"写回库"而不是让各处直接读文件：这样下游代码（AiService、
+     * ConfigService、Bot、Boss）**一行都不用改**，它们仍旧从库里读，只是库的内容由文件驱动；
+     * 原来的读库逻辑也完整保留，随时能退回数据库模式，跟上游合并也几乎零冲突。
+     */
+    public void syncConfigFromFile() {
+        try {
+            if (!configFileService.exists()) {
+                exportConfigToFile();
+                return;
+            }
+            Map<String, Object> root = configFileService.read();
+            if (root == null || root.isEmpty()) {
+                return;
+            }
+            Map<String, Object> search = asMap(root.get("search"));
+            Map<String, Object> delivery = asMap(root.get("delivery"));
+            Map<String, Object> ai = asMap(root.get("ai"));
+            Map<String, Object> notify = asMap(root.get("notify"));
+
+            // ---------- 1) boss_config 表 ----------
+            BossConfigEntity cfg = getFirstConfig();
+            if (cfg == null) {
+                cfg = new BossConfigEntity();
+                cfg.setCreatedAt(LocalDateTime.now());
+            }
+            if (search.containsKey("keywords")) cfg.setKeywords(listJoin(search.get("keywords")));
+            if (search.containsKey("city")) cfg.setCityCode(bracket(search.get("city")));
+            if (search.containsKey("city_filter_mode")) cfg.setCityFilterMode(flag(search.get("city_filter_mode")));
+            if (search.containsKey("city_exclude")) cfg.setCityExclude(bracket(search.get("city_exclude")));
+            if (search.containsKey("job_type")) cfg.setJobType(str(search.get("job_type")));
+            if (search.containsKey("experience")) cfg.setExperience(bracket(search.get("experience")));
+            if (search.containsKey("degree")) cfg.setDegree(bracket(search.get("degree")));
+            if (search.containsKey("salary")) cfg.setSalary(bracket(search.get("salary")));
+            if (search.containsKey("scale")) cfg.setScale(bracket(search.get("scale")));
+            if (search.containsKey("stage")) cfg.setStage(bracket(search.get("stage")));
+            if (search.containsKey("industry")) cfg.setIndustry(bracket(search.get("industry")));
+
+            if (delivery.containsKey("say_hi")) cfg.setSayHi(str(delivery.get("say_hi")));
+            if (delivery.containsKey("wait_time")) cfg.setWaitTime(toInt(delivery.get("wait_time")));
+            if (delivery.containsKey("enable_ai")) cfg.setEnableAi(flag(delivery.get("enable_ai")));
+            if (delivery.containsKey("filter_dead_hr")) cfg.setFilterDeadHr(flag(delivery.get("filter_dead_hr")));
+            if (delivery.containsKey("send_img_resume")) cfg.setSendImgResume(flag(delivery.get("send_img_resume")));
+            if (delivery.containsKey("hr_active_max_days")) cfg.setHrActiveMaxDays(toInt(delivery.get("hr_active_max_days")));
+            if (delivery.containsKey("skip_delivered_company")) cfg.setSkipDeliveredCompany(flag(delivery.get("skip_delivered_company")));
+            if (delivery.containsKey("debugger")) cfg.setDebugger(flag(delivery.get("debugger")));
+
+            cfg.setUpdatedAt(LocalDateTime.now());
+            if (cfg.getId() == null) {
+                bossConfigMapper.insert(cfg);
+            } else {
+                bossConfigMapper.updateById(cfg);
+            }
+
+            // ---------- 2) config 表（AI 凭据 + 通知）----------
+            if (ai.containsKey("base_url")) updateConfigValue("BASE_URL", str(ai.get("base_url")));
+            if (ai.containsKey("api_key")) updateConfigValue("API_KEY", str(ai.get("api_key")));
+            if (ai.containsKey("model")) updateConfigValue("MODEL", str(ai.get("model")));
+            if (notify.containsKey("hook_url")) updateConfigValue("HOOK_URL", str(notify.get("hook_url")));
+            if (notify.containsKey("bot_is_send")) {
+                updateConfigValue("BOT_IS_SEND", String.valueOf(flag(notify.get("bot_is_send"))));
+            }
+
+            // ---------- 3) ai 表（introduce / prompt）----------
+            if (ai.containsKey("introduce") || ai.containsKey("prompt")) {
+                updateAiConfig(ai.containsKey("introduce") ? str(ai.get("introduce")) : null,
+                        ai.containsKey("prompt") ? str(ai.get("prompt")) : null);
+            }
+
+            log.info("已从 config/boss.yaml 同步配置到数据库");
+        } catch (Exception e) {
+            log.warn("同步 config/boss.yaml 失败，本次仍按数据库里的配置执行：{}", e.getMessage());
+        }
+    }
+
+    /**
+     * 把网页端提交的配置写进 config/boss.yaml（权威来源），然后立即回写数据库保持一致。
+     *
+     * <p>写入方式是在**现有文件内容上合并**，而不是整体覆盖 —— 因为网页端表单只覆盖
+     * search / delivery 两块，ai / notify 由别的页面维护，整体覆盖会把它们清空。
+     */
+    public boolean saveConfigToFile(BossConfigEntity partial) {
+        if (partial == null) {
+            return false;
+        }
+        try {
+            Map<String, Object> root = configFileService.exists()
+                    ? new java.util.LinkedHashMap<>(configFileService.read())
+                    : new java.util.LinkedHashMap<>();
+            Map<String, Object> search = new java.util.LinkedHashMap<>(asMap(root.get("search")));
+            Map<String, Object> delivery = new java.util.LinkedHashMap<>(asMap(root.get("delivery")));
+
+            if (partial.getKeywords() != null) search.put("keywords", parseListString(partial.getKeywords()));
+            if (partial.getJobType() != null) search.put("job_type", partial.getJobType());
+            if (partial.getExperience() != null) search.put("experience", parseListString(partial.getExperience()));
+            if (partial.getDegree() != null) search.put("degree", parseListString(partial.getDegree()));
+            if (partial.getSalary() != null) search.put("salary", parseListString(partial.getSalary()));
+            if (partial.getScale() != null) search.put("scale", parseListString(partial.getScale()));
+            if (partial.getStage() != null) search.put("stage", parseListString(partial.getStage()));
+            if (partial.getIndustry() != null) search.put("industry", parseListString(partial.getIndustry()));
+            // 城市：网页端已是逗号分隔的多值输入框，且 BossConfigController.updateConfig
+            // 已经把它归一化成『中文名的括号列表』（单城市就是该名字），这里照写即可。
+            // null 表示"本次不动这个字段"，保持文件里的原值。
+            if (partial.getCityCode() != null) search.put("city", parseListString(partial.getCityCode()));
+            // 多城市处理方式：true = 过滤模式（搜全国 + 按岗位城市筛），false = 逐城市轮换
+            if (partial.getCityFilterMode() != null) search.put("city_filter_mode", partial.getCityFilterMode() == 1);
+            // 排除的城市/省份
+            if (partial.getCityExclude() != null) search.put("city_exclude", parseListString(partial.getCityExclude()));
+
+            if (partial.getSayHi() != null) delivery.put("say_hi", partial.getSayHi());
+            if (partial.getWaitTime() != null) delivery.put("wait_time", partial.getWaitTime());
+            if (partial.getEnableAi() != null) delivery.put("enable_ai", partial.getEnableAi() == 1);
+            if (partial.getFilterDeadHr() != null) delivery.put("filter_dead_hr", partial.getFilterDeadHr() == 1);
+            if (partial.getSendImgResume() != null) delivery.put("send_img_resume", partial.getSendImgResume() == 1);
+            if (partial.getHrActiveMaxDays() != null) delivery.put("hr_active_max_days", partial.getHrActiveMaxDays());
+            if (partial.getSkipDeliveredCompany() != null) delivery.put("skip_delivered_company", partial.getSkipDeliveredCompany() == 1);
+            if (partial.getDebugger() != null) delivery.put("debugger", partial.getDebugger() == 1);
+
+            root.put("search", search);
+            root.put("delivery", delivery);
+            root.putIfAbsent("ai", new java.util.LinkedHashMap<>());
+            root.putIfAbsent("notify", new java.util.LinkedHashMap<>());
+
+            boolean ok = configFileService.write(root);
+            if (ok) {
+                syncConfigFromFile(); // 立刻回写库，避免文件与库短暂不一致
+            }
+            return ok;
+        } catch (Exception e) {
+            log.warn("保存配置到 config/boss.yaml 失败：{}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 把 AI（introduce / prompt）与通知（hook_url / bot_is_send）写进 config/boss.yaml。
+     *
+     * <p>为什么必须落文件：配置以文件为权威，syncConfigFromFile() 在每次启动/投递前都会用
+     * 文件里的 ai / notify 块覆盖数据库。只改库不写文件的话，这次修改会在下一次 sync
+     * 时被打回原值。参数为 null 表示"本次不改这一项"。
+     */
+    public boolean saveAiAndNotifyToFile(String introduce, String prompt, String hookUrl, String botIsSend) {
+        try {
+            if (!configFileService.exists()) {
+                // 先做首次迁移，避免新写出去的文件缺 base_url / api_key 等键
+                exportConfigToFile();
+            }
+            Map<String, Object> root = new java.util.LinkedHashMap<>(configFileService.read());
+            Map<String, Object> ai = new java.util.LinkedHashMap<>(asMap(root.get("ai")));
+            Map<String, Object> notify = new java.util.LinkedHashMap<>(asMap(root.get("notify")));
+
+            if (introduce != null) ai.put("introduce", introduce);
+            if (prompt != null) ai.put("prompt", prompt);
+            if (hookUrl != null) notify.put("hook_url", hookUrl);
+            // 写成 true/false（和 exportConfigToFile 一致），而不是 1/0，方便手工编辑文件
+            if (botIsSend != null) {
+                notify.put("bot_is_send", "1".equals(botIsSend) || "true".equalsIgnoreCase(botIsSend));
+            }
+
+            root.put("ai", ai);
+            root.put("notify", notify);
+
+            boolean ok = configFileService.write(root);
+            if (ok) {
+                syncConfigFromFile(); // 立刻回写库，避免文件与库短暂不一致
+            }
+            return ok;
+        } catch (Exception e) {
+            log.warn("保存 AI / 通知配置到 config/boss.yaml 失败：{}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** YAML 不存在时，把数据库里的现有配置导出成 boss.yaml（首次迁移，不丢配置） */
+    private void exportConfigToFile() {
+        try {
+            BossConfigEntity cfg = getFirstConfig();
+            if (cfg == null) {
+                return; // 库里也没有配置，那就等用户按模板自己创建文件
+            }
+            Map<String, Object> search = new java.util.LinkedHashMap<>();
+            search.put("keywords", parseListString(cfg.getKeywords()));
+            search.put("city", parseListString(cfg.getCityCode()));
+            // 与网页端保持一致：多城市处理方式也写进文件
+            search.put("city_filter_mode", flagOf(cfg.getCityFilterMode()));
+            search.put("city_exclude", parseListString(cfg.getCityExclude()));
+            search.put("job_type", cfg.getJobType() == null ? "" : cfg.getJobType());
+            search.put("experience", parseListString(cfg.getExperience()));
+            search.put("degree", parseListString(cfg.getDegree()));
+            search.put("salary", parseListString(cfg.getSalary()));
+            search.put("scale", parseListString(cfg.getScale()));
+            search.put("stage", parseListString(cfg.getStage()));
+            search.put("industry", parseListString(cfg.getIndustry()));
+
+            Map<String, Object> delivery = new java.util.LinkedHashMap<>();
+            delivery.put("say_hi", cfg.getSayHi() == null ? "" : cfg.getSayHi());
+            delivery.put("wait_time", cfg.getWaitTime());
+            delivery.put("enable_ai", flagOf(cfg.getEnableAi()));
+            delivery.put("send_img_resume", flagOf(cfg.getSendImgResume()));
+            delivery.put("filter_dead_hr", flagOf(cfg.getFilterDeadHr()));
+            delivery.put("hr_active_max_days", cfg.getHrActiveMaxDays());
+            delivery.put("skip_delivered_company", flagOf(cfg.getSkipDeliveredCompany()));
+            delivery.put("debugger", flagOf(cfg.getDebugger()));
+
+            Map<String, Object> ai = new java.util.LinkedHashMap<>();
+            ai.put("base_url", readConfigValue("BASE_URL"));
+            ai.put("api_key", readConfigValue("API_KEY"));
+            ai.put("model", readConfigValue("MODEL"));
+            ai.put("introduce", readAiValue("introduce"));
+            ai.put("prompt", readAiValue("prompt"));
+
+            Map<String, Object> notify = new java.util.LinkedHashMap<>();
+            notify.put("hook_url", readConfigValue("HOOK_URL"));
+            notify.put("bot_is_send", "1".equals(readConfigValue("BOT_IS_SEND")));
+
+            Map<String, Object> root = new java.util.LinkedHashMap<>();
+            root.put("search", search);
+            root.put("delivery", delivery);
+            root.put("ai", ai);
+            root.put("notify", notify);
+
+            if (configFileService.write(root)) {
+                log.info("config/boss.yaml 不存在，已把数据库里的配置导出为该文件（后续以文件为准）");
+            }
+        } catch (Exception e) {
+            log.warn("导出配置到 config/boss.yaml 失败：{}", e.getMessage());
+        }
+    }
+
+    // ==================== 配置同步用到的小工具 ====================
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMap(Object o) {
+        return (o instanceof Map) ? (Map<String, Object>) o : java.util.Collections.emptyMap();
+    }
+
+    /** 统一转成字符串（多行 YAML 的 | 块会带尾换行，这里只去尾部空白） */
+    private static String str(Object o) {
+        return o == null ? "" : String.valueOf(o).strip();
+    }
+
+    /** true/false、1/0、"true"/"false" → 1/0（数据库里用 0/1 存布尔） */
+    private static Integer flag(Object o) {
+        if (o == null) return null;
+        if (o instanceof Boolean b) return b ? 1 : 0;
+        String s = String.valueOf(o).trim().toLowerCase();
+        return ("true".equals(s) || "1".equals(s) || "yes".equals(s)) ? 1 : 0;
+    }
+
+    private static Boolean flagOf(Integer v) {
+        return v != null && v == 1;
+    }
+
+    private static Integer toInt(Object o) {
+        if (o == null) return null;
+        try {
+            return Integer.valueOf(String.valueOf(o).trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 列表 → 逗号分隔（keywords 在库里就是这种形式） */
+    private static String listJoin(Object o) {
+        if (o instanceof List<?> list) {
+            return list.stream().map(String::valueOf).map(String::trim)
+                    .filter(s -> !s.isEmpty()).collect(Collectors.joining(","));
+        }
+        return str(o);
+    }
+
+    /** 列表 → 括号列表（其他多选项在库里是 [a,b] 形式） */
+    private static String bracket(Object o) {
+        if (o instanceof List<?> list) {
+            List<String> items = list.stream().map(String::valueOf).map(String::trim)
+                    .filter(s -> !s.isEmpty()).collect(Collectors.toList());
+            return items.isEmpty() ? "" : "[" + String.join(",", items) + "]";
+        }
+        return str(o);
+    }
+
+    /** 更新 config 表的某个键（表里没有该键时忽略） */
+    private void updateConfigValue(String key, String value) {
+        if (value == null) return;
+        try (Connection conn = dataSource.getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(
+                     "UPDATE config SET config_value = ?, updated_at = ? WHERE config_key = ?")) {
+            ps.setString(1, value);
+            ps.setString(2, LocalDateTime.now().toString());
+            ps.setString(3, key);
+            ps.executeUpdate();
+        } catch (Exception e) {
+            log.warn("更新 config.{} 失败：{}", key, e.getMessage());
+        }
+    }
+
+    /** 读取 config 表的某个键 */
+    private String readConfigValue(String key) {
+        try (Connection conn = dataSource.getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(
+                     "SELECT config_value FROM config WHERE config_key = ? LIMIT 1")) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : "";
+            }
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 读取 ai 表最新一条的指定列（只用于导出配置，列名由本类内部常量传入） */
+    private String readAiValue(String column) {
+        try (Connection conn = dataSource.getConnection();
+             Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT " + column + " FROM ai ORDER BY id DESC LIMIT 1")) {
+            return rs.next() && rs.getString(1) != null ? rs.getString(1) : "";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 更新 ai 表最新一条的 introduce / prompt（没有则插入一条） */
+    private void updateAiConfig(String introduce, String prompt) {
+        try (Connection conn = dataSource.getConnection()) {
+            Long id = null;
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT id FROM ai ORDER BY id DESC LIMIT 1")) {
+                if (rs.next()) {
+                    id = rs.getLong(1);
+                }
+            }
+            String now = LocalDateTime.now().toString();
+            if (id == null) {
+                try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO ai (introduce, prompt, created_at, updated_at) VALUES (?,?,?,?)")) {
+                    ps.setString(1, introduce);
+                    ps.setString(2, prompt);
+                    ps.setString(3, now);
+                    ps.setString(4, now);
+                    ps.executeUpdate();
+                }
+            } else {
+                try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE ai SET introduce = COALESCE(?, introduce), prompt = COALESCE(?, prompt), updated_at = ? WHERE id = ?")) {
+                    ps.setString(1, introduce);
+                    ps.setString(2, prompt);
+                    ps.setString(3, now);
+                    ps.setLong(4, id);
+                    ps.executeUpdate();
+                }
+            }
+        } catch (Exception e) {
+            log.warn("更新 ai 表失败：{}", e.getMessage());
+        }
+    }
+
+    /**
      * 加载Boss配置
      * 从配置文件和数据库加载完整的Boss配置
      */
     public BossConfig loadBossConfig() {
+        // 配置以 config/boss.yaml 为权威来源：先把它同步进库，下面照旧从库读。
+        // 这样下游（AiService / ConfigService / Bot / Boss）完全不用改，也便于跟上游合并。
+        // YAML 不存在时这里会把库里的现有配置导出成 YAML（首次迁移），不丢配置。
+        syncConfigFromFile();
+
         // 直接从数据库 boss_config 加载，并将括号列表解析为集合
         BossConfigEntity entity = getFirstConfig();
         BossConfig config = new BossConfig();
@@ -281,6 +677,15 @@ public class BossService {
         // 将中文名转换为代码，供 Worker 使用
         // 城市：单值或列表，统一转换为代码列表
         config.setCityCode(toCodes("city", parseListString(entity.getCityCode())));
+        // 城市的中文名（过滤模式要用它比对岗位详情里的 locationName）
+        config.setCityNames(parseListString(entity.getCityCode()));
+        // 多城市处理方式：true = 过滤模式（搜全国 + 按岗位城市筛）；false/null = 逐城市轮换（原行为）
+        config.setCityFilterMode(entity.getCityFilterMode() != null && entity.getCityFilterMode() == 1);
+        // 排除的城市/省份（平台侧用 CityFilter 展开省份后再匹配岗位地点）
+        config.setCityExclude(parseListString(entity.getCityExclude()));
+        // 同一家公司不重复投递：null 视为开启
+        config.setSkipDeliveredCompany(entity.getSkipDeliveredCompany() == null
+                || entity.getSkipDeliveredCompany() == 1);
         // 行业/经验/学历/规模/阶段：名称或代码 -> 统一为代码列表
         config.setIndustry(toCodes("industry", parseListString(entity.getIndustry())));
         config.setExperience(toCodes("experience", parseListString(entity.getExperience())));
@@ -317,13 +722,17 @@ public class BossService {
         // HR不在线状态（括号列表字符串）
         config.setDeadStatus(parseListString(entity.getDeadStatus()));
 
+        // HR 活跃度阈值（天）：字段没配（null）时按 30 天处理；显式配 0 表示不启用细粒度判定
+        config.setHrActiveMaxDays(entity.getHrActiveMaxDays() == null ? 30 : entity.getHrActiveMaxDays());
+
         log.info("已从 boss_config 加载Boss配置，并完成括号列表解析");
         return config;
     }
 
     /**
      * 解析括号列表或逗号分隔的字符串为列表，例如 "[a,b,c]" 或 "a,b,c"。
-     * 空值返回空列表。
+     * <p>分隔符同时接受<b>半角逗号与全角逗号</b>（中文输入法下很容易打出「，」），
+     * 也接受中文分号/顿号，避免用户手打配置时踩坑。空值返回空列表。
      */
     public List<String> parseListString(String raw) {
         if (raw == null || raw.trim().isEmpty()) return java.util.Collections.emptyList();
@@ -332,7 +741,7 @@ public class BossService {
             s = s.substring(1, s.length() - 1);
         }
         if (s.trim().isEmpty()) return java.util.Collections.emptyList();
-        return java.util.Arrays.stream(s.split(","))
+        return java.util.Arrays.stream(s.split("[,，、;；]"))
                 .map(String::trim)
                 // 去除项内可能存在的双引号，兼容 JSON 数组序列化存储
                 .map(str -> str.replaceAll("^\"|\"$", ""))
@@ -382,16 +791,38 @@ public class BossService {
     }
 
     /**
-     * 统一化城市：将 city 值（可能是 code 或 name 或括号列表）转换为『城市中文名』。
+     * 统一化城市：把 city 值（code / 中文名 / 括号列表 / 逗号分隔）统一成
+     * 『城市中文名的括号列表』。
+     * <p>
+     * 旧实现只取 list.get(0)，于是"多城市"配置只要被保存一次就被压成单个城市。
+     * 现在逐个归一化再拼回去；只有单个城市时行为与原来完全一致。
+     * <p>
+     * ⚠️ 注意：网页端的城市下拉框仍是单选，而且前端在**加载配置时**就只回显第一个
+     * （front/app/boss/page.tsx 的 normalizeCityCode 里 `return list[0]`），
+     * 所以"在网页端点保存"依然会把多城市写回单个 —— 需要连前端一起改并重建 dist
+     * 才能让网页端也保住多城市。
      */
     public String normalizeCityToName(String raw) {
         List<String> list = parseListString(raw);
-        String first = list.isEmpty() ? (raw == null ? "" : raw.trim()) : list.get(0);
-        if (first.isEmpty()) return "";
-        BossOptionEntity byCode = getOptionByTypeAndCode("city", first);
-        if (byCode != null && byCode.getName() != null) return byCode.getName();
-        // 已是中文名
-        return first;
+        if (list.isEmpty()) {
+            return raw == null ? "" : raw.trim();
+        }
+        List<String> names = list.stream()
+                .map(city -> {
+                    if (city == null) return "";
+                    String v = city.trim();
+                    if (v.isEmpty()) return "";
+                    BossOptionEntity byCode = getOptionByTypeAndCode("city", v);
+                    return (byCode != null && byCode.getName() != null) ? byCode.getName() : v;
+                })
+                .filter(n -> !n.isEmpty())
+                .collect(Collectors.toList());
+        if (names.isEmpty()) return "";
+        if (names.size() == 1) return names.get(0);
+        // 「不限」是"全选"，跟具体城市混在一起没有意义，直接丢掉
+        names.removeIf("不限"::equals);
+        if (names.isEmpty()) return "不限";
+        return names.size() == 1 ? names.get(0) : "[" + String.join(",", names) + "]";
     }
 
     // ==================== Blacklist相关方法 ====================
@@ -506,7 +937,56 @@ public class BossService {
                         cols.add(rs.getString("name"));
                     }
                 }
+                // 补列：HR 活跃度阈值（属于 boss_config 表，与 boss_data 无关；
+                // 放在这里只因为这个方法已经是「投递前确保表结构」的现成入口）
+                try (java.sql.ResultSet rsCfg = stmt.executeQuery("PRAGMA table_info('boss_config')")) {
+                    java.util.List<String> cfgCols = new java.util.ArrayList<>();
+                    while (rsCfg.next()) {
+                        cfgCols.add(rsCfg.getString("name"));
+                    }
+                    if (!cfgCols.isEmpty() && !cfgCols.contains("hr_active_max_days")) {
+                        stmt.execute("ALTER TABLE boss_config ADD COLUMN hr_active_max_days INTEGER");
+                        log.info("已为 boss_config 补上 hr_active_max_days 列");
+                    }
+                    // 多城市处理方式：1 = 过滤模式（搜全国后按岗位城市筛），0/null = 逐城市轮换
+                    if (!cfgCols.isEmpty() && !cfgCols.contains("city_filter_mode")) {
+                        stmt.execute("ALTER TABLE boss_config ADD COLUMN city_filter_mode INTEGER");
+                        log.info("已为 boss_config 补上 city_filter_mode 列");
+                    }
+                    // 排除的城市/省份（命中即跳过；省份名会展开成该省城市）
+                    if (!cfgCols.isEmpty() && !cfgCols.contains("city_exclude")) {
+                        stmt.execute("ALTER TABLE boss_config ADD COLUMN city_exclude TEXT");
+                        log.info("已为 boss_config 补上 city_exclude 列");
+                    }
+                    // 同一家公司不重复投递：1/null = 开启，0 = 关闭
+                    if (!cfgCols.isEmpty() && !cfgCols.contains("skip_delivered_company")) {
+                        stmt.execute("ALTER TABLE boss_config ADD COLUMN skip_delivered_company INTEGER");
+                        log.info("已为 boss_config 补上 skip_delivered_company 列");
+                    }
+                } catch (Exception e) {
+                    log.warn("为 boss_config 补 hr_active_max_days 列失败：{}", e.getMessage());
+                }
+
+                // 建表：HR 聊天快照，用于对比出「谁回了我」（配合投递前的聊天页扫描）
+                try {
+                    stmt.execute("CREATE TABLE IF NOT EXISTS hr_chat_snapshot (" +
+                            "company_name TEXT PRIMARY KEY, last_message TEXT, updated_at TEXT)");
+                } catch (Exception e) {
+                    log.warn("创建 hr_chat_snapshot 表失败：{}", e.getMessage());
+                }
+
                 if (cols.isEmpty()) return; // 表不存在或无列
+
+                // 补列：JD 规则的 warn 提示（老库缺这一列时补上，已是新库则跳过）
+                if (!cols.contains("filter_note")) {
+                    try {
+                        stmt.execute("ALTER TABLE boss_data ADD COLUMN filter_note TEXT");
+                        log.info("已为 boss_data 补上 filter_note 列");
+                    } catch (Exception e) {
+                        log.warn("为 boss_data 添加 filter_note 列失败：{}", e.getMessage());
+                    }
+                }
+
                 boolean needMigrate = true;
                 if (cols.size() >= 3) {
                     String c0 = cols.get(0) == null ? "" : cols.get(0).toLowerCase();
@@ -538,6 +1018,7 @@ public class BossService {
                         "hr_active_status TEXT, " +
                         "delivery_status TEXT, " +
                         "job_description TEXT, " +
+                        "filter_note TEXT, " +
                         "job_url TEXT, " +
                         "recruitment_status TEXT, " +
                         "company_address TEXT, " +
@@ -597,6 +1078,104 @@ public class BossService {
                 .last("LIMIT 1");
         Long count = bossJobDataMapper.selectCount(wrapper);
         return count != null && count > 0;
+    }
+
+    /**
+     * 取所有「已投递」岗位的 encrypt_id，供投递前跳过重复岗位用。
+     * 一次性加载到内存（投递时逐岗位查库会多几百次往返），失败则返回空集合。
+     */
+    public java.util.Set<String> getDeliveredEncryptIds() {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        try {
+            QueryWrapper<BossJobDataEntity> wrapper = new QueryWrapper<>();
+            wrapper.select("encrypt_id")
+                    .eq("delivery_status", "已投递")
+                    .isNotNull("encrypt_id");
+            for (BossJobDataEntity row : bossJobDataMapper.selectList(wrapper)) {
+                if (row.getEncryptId() != null && !row.getEncryptId().isEmpty()) {
+                    ids.add(row.getEncryptId());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("加载已投递岗位列表失败（本次不做重复投递过滤）：{}", e.getMessage());
+        }
+        return ids;
+    }
+
+    /**
+     * 读取「已经投递过」的公司名集合，用于"同一家公司不重复投递"。
+     *
+     * <p>为什么按公司去重：同一家公司在 Boss 上往往挂着多个相近岗位（甚至同一个 HR 换个标题再发一遍），
+     * 逐个岗位去重挡不住这种重复打扰。这里以 {@code delivery_status = 已投递} 的记录为准：
+     * 只要这家公司已经投过，它名下没投过的岗位也会被跳过。
+     */
+    public java.util.Set<String> getDeliveredCompanies() {
+        java.util.Set<String> companies = new java.util.HashSet<>();
+        try {
+            QueryWrapper<BossJobDataEntity> wrapper = new QueryWrapper<>();
+            wrapper.select("company_name")
+                    .eq("delivery_status", "已投递")
+                    .isNotNull("company_name");
+            for (BossJobDataEntity row : bossJobDataMapper.selectList(wrapper)) {
+                String name = row.getCompanyName();
+                if (name != null && !name.isBlank()) {
+                    companies.add(name.trim());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("加载已投递公司列表失败（本次不做公司级去重）：{}", e.getMessage());
+        }
+        return companies;
+    }
+
+    /**
+     * 读取 HR 聊天快照：公司名 -&gt; 最后一条消息。表不存在或读失败时返回空 Map
+     * （空 Map 会被上层当作「首次运行」，只建基线不报新回复）。
+     */
+    public java.util.Map<String, String> getChatSnapshot() {
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement st = conn.createStatement();
+             java.sql.ResultSet rs = st.executeQuery("select company_name, last_message from hr_chat_snapshot")) {
+            while (rs.next()) {
+                map.put(rs.getString(1), rs.getString(2));
+            }
+        } catch (Exception e) {
+            log.warn("读取 HR 聊天快照失败（本次按首次运行处理）：{}", e.getMessage());
+        }
+        return map;
+    }
+
+    /**
+     * 覆盖写入 HR 聊天快照（先清空再批量插入，保证和当前会话列表一致）。
+     */
+    public void replaceChatSnapshot(java.util.Map<String, String> snapshot) {
+        if (snapshot == null) return;
+        java.sql.Connection conn = null;
+        try {
+            conn = dataSource.getConnection();
+            conn.setAutoCommit(false);
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.executeUpdate("DELETE FROM hr_chat_snapshot");
+            }
+            try (java.sql.PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO hr_chat_snapshot(company_name, last_message, updated_at) VALUES (?,?,?)")) {
+                String now = java.time.LocalDateTime.now().toString();
+                for (java.util.Map.Entry<String, String> e : snapshot.entrySet()) {
+                    ps.setString(1, e.getKey());
+                    ps.setString(2, e.getValue());
+                    ps.setString(3, now);
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+            conn.commit();
+        } catch (Exception e) {
+            log.warn("写入 HR 聊天快照失败：{}", e.getMessage());
+            try { if (conn != null) conn.rollback(); } catch (Exception ignore) {}
+        } finally {
+            try { if (conn != null) conn.close(); } catch (Exception ignore) {}
+        }
     }
 
     /**

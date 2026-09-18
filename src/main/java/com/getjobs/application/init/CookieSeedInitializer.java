@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * 应用启动时为各平台创建 Cookie 种子记录（若缺失）
+ * 应用启动时为 Boss 平台创建 Cookie 种子记录（若缺失）
  * 目的：确保后续保存操作始终更新同一条记录，避免“无记录无法更新”的情况。
  */
 @Slf4j
@@ -23,7 +23,7 @@ public class CookieSeedInitializer implements CommandLineRunner {
     /**
      * 统一平台标识（与控制器/PlaywrightManager 保持一致）
      */
-    private static final List<String> PLATFORMS = List.of("boss", "liepin", "51job", "zhilian");
+    private static final List<String> PLATFORMS = List.of("boss");
 
     @Override
     public void run(String... args) {

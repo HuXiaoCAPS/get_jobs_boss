@@ -26,7 +26,7 @@ public class CookieController {
     private final CookieService cookieService;
     private final PlaywrightManager playwrightManager;
 
-    private static final Set<String> ALLOWED_PLATFORMS = Set.of("boss", "liepin", "51job", "zhilian");
+    private static final Set<String> ALLOWED_PLATFORMS = Set.of("boss");
 
     @GetMapping
     public ResponseEntity<Map<String, Object>> getCookie(@RequestParam("platform") String platform) {

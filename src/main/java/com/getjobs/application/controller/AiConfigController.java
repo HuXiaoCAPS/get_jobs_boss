@@ -2,6 +2,7 @@ package com.getjobs.application.controller;
 
 import com.getjobs.application.entity.AiEntity;
 import com.getjobs.application.service.AiService;
+import com.getjobs.application.service.BossService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -23,6 +24,9 @@ public class AiConfigController {
 
     @Autowired
     private AiService aiService;
+
+    @Autowired
+    private BossService bossService;
 
     /**
      * 获取AI配置
@@ -69,6 +73,10 @@ public class AiConfigController {
             }
 
             AiEntity aiEntity = aiService.saveOrUpdateAiConfig(introduce, prompt);
+
+            // 配置以 config/boss.yaml 为权威来源：这里必须把 ai 块同步写回文件，
+            // 否则下次 syncConfigFromFile()（启动/投递前）会拿文件里的旧值把这次修改覆盖掉
+            bossService.saveAiAndNotifyToFile(introduce, prompt, null, null);
 
             response.put("success", true);
             response.put("data", aiEntity);

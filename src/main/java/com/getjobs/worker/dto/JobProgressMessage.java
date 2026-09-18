@@ -13,7 +13,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class JobProgressMessage {
     /**
-     * 平台名称 (boss, liepin, job51, zhilian)
+     * 平台名称 (boss)
      */
     private String platform;
 
