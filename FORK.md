@@ -38,9 +38,19 @@
 
 ### 1. 平台收敛：只留 Boss
 
-删掉 35 个后端文件：`worker/{liepin,job51,zhilian}` 三个包、对应的 JobService / Controller / Service、
-9 个 entity、9 个 mapper、`ZhilianOptionInitializer`。
-`PlaywrightManager` 从 2069 行减到 1006 行（只初始化与监控 Boss 页面）；`ConfigService` 只剩 Boss。
+删掉 **37 个后端文件**（35 个平台专属 + 2 个被新架构取代）：
+
+| 类别 | 数量 | 内容 |
+|---|---|---|
+| `worker/{liepin,job51,zhilian}` | 7 | 三个平台的主类 / Config / Locators |
+| `worker/service/*JobService` | 5 | 三个平台的 JobService + `BossJobService`、`JobPlatformService`（被任务壳/新契约取代）|
+| `application/controller` | 3 | JobController(51job) / LiepinController / ZhilianController |
+| `application/service` | 3 | LiepinService / Job51Service / ZhilianService |
+| `application/entity` | 9 | 三个平台的 Config / 主实体 / Option |
+| `application/mapper` | 9 | 上面对应的 Mapper |
+| `application/init` | 1 | ZhilianOptionInitializer |
+
+`PlaywrightManager` 从 2069 行减到 1007 行（只初始化与监控 Boss 页面）；`ConfigService` 只剩 Boss。
 
 > 上游是"接口 + 四个平台各写一遍"（每个平台一套 `xxx(keyword)` / `getSearchUrl()` / 页面流程，零复用）。
 > 本 fork 把这些**平行副本**换成了真正的抽象（下一节）。
@@ -61,7 +71,7 @@ HTTP/SSE ─→ PlatformController ─→ PlatformTaskManager ─→ DeliveryRun
 
 | 组件 | 位置 | 职责 |
 |---|---|---|
-| `JobPlatform` | `worker/platform/` | **平台契约**：`id`/`ensureSession`/`buildQueries`/`search`/`openDetail`/`matchesCity`/`sendGreeting`/`scanReplies`/`store()`/`runTask()`。签名里不出现 Locator/Page/JSON/平台配置类 |
+| `JobPlatform` | `worker/platform/` | **平台契约**：`id` / `displayName` / `isLoggedIn` / `ensureSession` / `pauseMonitoring` / `resumeMonitoring` / `runTask` / `buildQueries` / `search` / `openDetail` / `matchesCity` / `sendGreeting` / `supportsImageResume` / `scanReplies` / `store()`（后 5 个有默认实现）。签名里不出现 Locator/Page/JSON/平台配置类 |
 | `DeliveryRunner` | 同上 | **流程层**：搜索→详情→过滤→AI→落库→限速。不 import 任何平台包、无 Playwright 类型 |
 | `DeliveryStore` | 同上 | 数据读写契约；实现由**平台自报**（`BossDeliveryStore` → `boss_data`，假平台 → 内存） |
 | `PlatformTaskManager` | 同上 | 任务壳：start/stop/status/SSE + 强制复位看门狗，**不含任何平台字眼** |
