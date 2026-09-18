@@ -13,7 +13,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 配置服务类（本副本只服务 Boss 平台）
@@ -22,14 +24,51 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class ConfigService {
+
+    /**
+     * 敏感配置键：只允许在 config/boss.yaml 里维护，既不下发给网页端、也不接受网页端写入。
+     * <p>
+     * config 表是通用键值表，AI 凭据（BASE_URL / API_KEY / MODEL）和通知设置
+     * （HOOK_URL / BOT_IS_SEND）混在一起。上游前端有「环境变量配置」页要编辑这些键，
+     * 所以 ConfigController 干脆整表下发；本副本已取消网页端编辑入口（API Key 只认配置文件），
+     * 那条全量下发就只剩泄漏：GET /api/config 会把 API_KEY 明文吐给浏览器。
+     * <p>
+     * 集中声明在这里，是为了将来新增 AI 凭据时只需改一处。
+     */
+    public static final Set<String> SENSITIVE_KEYS = Set.of("API_KEY", "BASE_URL", "MODEL");
+
+    /**
+     * 是否为敏感配置键（忽略大小写与首尾空白）
+     */
+    public static boolean isSensitiveKey(String key) {
+        return key != null && SENSITIVE_KEYS.contains(key.trim().toUpperCase(Locale.ROOT));
+    }
+
     private final ConfigMapper configMapper;
     private final BossService bossService;
 
     /**
-     * 获取所有配置（以Map形式返回）
+     * 下发给网页端的配置：剔除 {@link #SENSITIVE_KEYS}。
+     * <p>
+     * 前端只用到 HOOK_URL / BOT_IS_SEND，仍按"整表减去敏感键"返回而不是写死白名单，
+     * 这样将来新增非敏感配置项时不用改接口签名。
+     *
+     * @return 不含敏感键的配置Map，key为config_key，value为config_value
+     */
+    public Map<String, String> getPublicConfigsAsMap() {
+        Map<String, String> configMap = readAllConfigsAsMap();
+        configMap.keySet().removeIf(ConfigService::isSensitiveKey);
+        return configMap;
+    }
+
+    /**
+     * 读取整张 config 表（含敏感键）。
+     * <p>
+     * 刻意保持私有：任何直接把它塞进 HTTP 响应的写法都会泄漏 API_KEY。
+     *
      * @return 配置Map，key为config_key，value为config_value
      */
-    public Map<String, String> getAllConfigsAsMap() {
+    private Map<String, String> readAllConfigsAsMap() {
         List<ConfigEntity> configs = configMapper.selectList(null);
         Map<String, String> configMap = new HashMap<>();
 
@@ -38,14 +77,6 @@ public class ConfigService {
         }
 
         return configMap;
-    }
-
-    /**
-     * 获取所有配置
-     * @return 配置列表
-     */
-    public List<ConfigEntity> getAllConfigs() {
-        return configMapper.selectList(null);
     }
 
     /**

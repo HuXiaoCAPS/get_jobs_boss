@@ -9,10 +9,16 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 配置控制器
  * 提供配置管理的REST API接口
+ * <p>
+ * 敏感键（API_KEY / BASE_URL / MODEL，见 {@link ConfigService#SENSITIVE_KEYS}）在这里的三条
+ * 路径上都要挡住：整表读、单键读、写入。它们是 AI 凭据，只允许在 config/boss.yaml 里维护。
+ * 本 Controller 带 @CrossOrigin("*")，一旦漏了就等于把 API_KEY 交给本机任意网页。
  */
 @Slf4j
 @RestController
@@ -27,7 +33,7 @@ public class ConfigController {
     private BossService bossService;
 
     /**
-     * 获取所有配置
+     * 获取所有配置（不含敏感键）
      * @return 配置Map
      */
     @GetMapping
@@ -35,7 +41,7 @@ public class ConfigController {
         Map<String, Object> response = new HashMap<>();
 
         try {
-            Map<String, String> configs = configService.getAllConfigsAsMap();
+            Map<String, String> configs = configService.getPublicConfigsAsMap();
 
             response.put("success", true);
             response.put("data", configs);
@@ -52,7 +58,7 @@ public class ConfigController {
     }
 
     /**
-     * 根据配置键获取单个配置
+     * 根据配置键获取单个配置（敏感键一律当作不存在）
      * @param key 配置键
      * @return 配置值
      */
@@ -61,6 +67,14 @@ public class ConfigController {
         Map<String, Object> response = new HashMap<>();
 
         try {
+            // 敏感键连"存在与否"都不确认：GET /api/config/API_KEY 与随便编一个键得到同样的 404
+            if (ConfigService.isSensitiveKey(key)) {
+                log.warn("拒绝下发敏感配置: {}", key);
+                response.put("success", false);
+                response.put("message", "配置不存在");
+                return ResponseEntity.notFound().build();
+            }
+
             var config = configService.getConfigByKey(key);
 
             if (config != null) {
@@ -83,7 +97,7 @@ public class ConfigController {
     }
 
     /**
-     * 批量更新配置
+     * 批量更新配置（拒绝写入敏感键）
      * @param configMap 配置Map，key为config_key，value为config_value
      * @return 更新结果
      */
@@ -95,6 +109,17 @@ public class ConfigController {
             if (configMap == null || configMap.isEmpty()) {
                 response.put("success", false);
                 response.put("message", "配置数据不能为空");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            // 写入侧同样要挡：否则谁都能把 API_KEY 改成别的，而"只认配置文件"的设计就废了
+            Set<String> rejected = configMap.keySet().stream()
+                    .filter(ConfigService::isSensitiveKey)
+                    .collect(Collectors.toSet());
+            if (!rejected.isEmpty()) {
+                log.warn("拒绝写入敏感配置: {}", rejected);
+                response.put("success", false);
+                response.put("message", "以下配置只允许在 config/boss.yaml 中修改: " + rejected);
                 return ResponseEntity.badRequest().body(response);
             }
 
@@ -123,7 +148,7 @@ public class ConfigController {
     }
 
     /**
-     * 更新单个配置
+     * 更新单个配置（拒绝写入敏感键）
      * @param key 配置键
      * @param requestBody 请求体包含value
      * @return 更新结果
@@ -141,6 +166,13 @@ public class ConfigController {
             if (value == null) {
                 response.put("success", false);
                 response.put("message", "配置值不能为空");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            if (ConfigService.isSensitiveKey(key)) {
+                log.warn("拒绝写入敏感配置: {}", key);
+                response.put("success", false);
+                response.put("message", "配置 " + key + " 只允许在 config/boss.yaml 中修改");
                 return ResponseEntity.badRequest().body(response);
             }
 
