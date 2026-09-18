@@ -50,7 +50,7 @@ import static com.getjobs.worker.boss.Locators.*;
 @Component
 @Scope("prototype")
 @RequiredArgsConstructor
-public class Boss implements JobPlatform {
+public class BossPlatform implements JobPlatform {
 
     @Setter
     private Page page;
@@ -460,10 +460,10 @@ public class Boss implements JobPlatform {
                 secondCard.click();
                 PlaywrightUtil.sleep(1);
                 final Locator firstCard = cards.nth(0);
-                detailResp = page.waitForResponse(Boss::isDetailResponse, firstCard::click);
+                detailResp = page.waitForResponse(BossPlatform::isDetailResponse, firstCard::click);
             } else {
                 final Locator cardToClick = cards.nth(index);
-                detailResp = page.waitForResponse(Boss::isDetailResponse, cardToClick::click);
+                detailResp = page.waitForResponse(BossPlatform::isDetailResponse, cardToClick::click);
             }
             PlaywrightUtil.sleep(1);
 
@@ -1038,7 +1038,7 @@ public class Boss implements JobPlatform {
     private boolean sendImageResume(Page page) {
         try {
             // 0) 资源存在性校验，避免后续无效操作
-            URL resourceUrlCheck = Boss.class.getResource("/resume.jpg");
+            URL resourceUrlCheck = BossPlatform.class.getResource("/resume.jpg");
             if (resourceUrlCheck == null) {
                 log.error("资源文件 resume.jpg 不存在，跳过发送图片简历");
                 return false;
@@ -1094,7 +1094,7 @@ public class Boss implements JobPlatform {
     }
 
     private java.nio.file.Path resolveResumeImage() throws Exception {
-        URL resourceUrl = Boss.class.getResource("/resume.jpg");
+        URL resourceUrl = BossPlatform.class.getResource("/resume.jpg");
         if (resourceUrl == null) {
             throw new IllegalStateException("资源文件 /resume.jpg 未找到，请将图片放置到 src/main/resources 目录下");
         }
@@ -1102,7 +1102,7 @@ public class Boss implements JobPlatform {
             return java.nio.file.Paths.get(resourceUrl.toURI());
         }
         java.nio.file.Path temp = java.nio.file.Files.createTempFile("resume-", ".jpg");
-        try (java.io.InputStream in = Boss.class.getResourceAsStream("/resume.jpg")) {
+        try (java.io.InputStream in = BossPlatform.class.getResourceAsStream("/resume.jpg")) {
             if (in == null) {
                 throw new IllegalStateException("无法从类路径读取 /resume.jpg 资源");
             }

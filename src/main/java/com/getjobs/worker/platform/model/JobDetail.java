@@ -6,7 +6,7 @@ import lombok.Data;
  * 点开之后拿到的「岗位详情」——平台无关的契约模型。
  *
  * <p>{@code jdText} 是<b>给规则与 AI 用</b>的文本，平台负责把该拼的都拼好
- * （Boss 的实现 = 岗位名 + JD 正文 + showSkills 标签，见 {@code Boss.buildRulesText}）。
+ * （Boss 的实现 = 岗位名 + JD 正文 + showSkills 标签，见 {@code BossPlatform.buildRulesText}）。
  * 这样流程层永远不需要知道"这个平台的关键信息藏在哪几个字段里"。
  */
 @Data
