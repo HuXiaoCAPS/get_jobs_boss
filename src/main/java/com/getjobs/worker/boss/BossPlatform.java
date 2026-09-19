@@ -319,6 +319,35 @@ public class BossPlatform implements JobPlatform {
         return deliveryStore;
     }
 
+    @Override
+    public boolean openInBrowser(String url) {
+        // 只允许打开 zhipin.com 自己的页面：这个动作是"拿已登录的浏览器打开一个地址"，
+        // 不校验域名就等于给网页端开了一个可以驱动登录态浏览器访问任意站点的跳板。
+        if (!isBossUrl(url)) {
+            log.warn("拒绝在自动化浏览器中打开非 Boss 地址：{}", url);
+            return false;
+        }
+        return playwrightManager.openNewPage(url);
+    }
+
+    /** 地址是否属于 Boss（host 为 zhipin.com 或其子域） */
+    private static boolean isBossUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        try {
+            String host = new URL(url.trim()).getHost();
+            if (host == null) {
+                return false;
+            }
+            String h = host.toLowerCase(java.util.Locale.ROOT);
+            return h.equals("zhipin.com") || h.endsWith(".zhipin.com");
+        } catch (Exception e) {
+            // URL 都解析不出来，自然谈不上"属于 Boss"
+            return false;
+        }
+    }
+
     // 注：投递策略（间隔 / AI 开关 / HR 阈值 / 兜底招呼语…）不在这里 ——
     // 它不是平台知识，由全局的 application.service.DeliveryPolicyService 统一提供。
 

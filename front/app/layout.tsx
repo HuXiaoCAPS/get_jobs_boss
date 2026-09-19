@@ -29,7 +29,9 @@ export default function RootLayout({
         >
           <div className="min-h-screen">
             <Toolbar />
-            <main className="mx-auto w-full max-w-6xl px-6 py-6">{children}</main>
+            {/* 容器宽度：数据页的表格列多，max-w-6xl（1152px）会把「备注」「详情」挤到横向滚动里，
+                所以放宽到 1600px。配置页是"标签 + 控件"两列布局，宽一点只是输入框更长，不影响使用。 */}
+            <main className="mx-auto w-full max-w-[1600px] px-6 py-6">{children}</main>
           </div>
         </ThemeProvider>
       </body>

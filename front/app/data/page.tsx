@@ -5,12 +5,19 @@ import { API_BASE } from '@/lib/api'
 import { cellPadding, loadPrefs } from '@/lib/prefs'
 
 /**
- * 数据页：投递记录（只读）+ 统计。
+ * 数据页：投递记录（只读）+ 统计 + 每行的详情弹窗。
  *
  * <p>**页面是平台无关的**：平台列表来自 `GET /api/platforms`，数据来自
  * `GET /api/platforms/{id}/jobs` 与 `/stats`。所以这里不出现任何平台的表名或字段名 ——
  * 换平台、加平台，这一页一行都不用改。（早先它写死 `/api/boss/list` 与
  * 「来自 boss_data 表」，等于把平台能力只做在了投递链路上。）
+ *
+ * <p>表格只放"扫一眼就能比较"的列（岗位/公司/薪资/城市/经验/学历/状态/备注）；
+ * HR、公司信息、JD 全文这类"要细看"的内容收进「查看详情」弹窗 ——
+ * 否则一行里塞十几列，横着滚半天也看不出重点。
+ *
+ * <p>「在自动化浏览器中打开」刻意不做成普通的 `<a target="_blank">`：
+ * 管理页所在的浏览器没有自动化 profile 的登录态，用它打开岗位详情只会看到登录页。
  *
  * 刻意不做"直接展示表 + 自由写 SQL"：
  *   - 后端已按平台提供分页/筛选/统计，字段与各平台的数据模型对齐，不用再维护一套 SQL；
@@ -34,6 +41,16 @@ type JobRow = {
   /** 过滤/提示备注 */
   note?: string
   jobUrl?: string
+
+  // 详情字段：列表里不展示，点「详情」才看（后端随列表一起返回，省一次往返）
+  jdText?: string
+  industry?: string
+  companyScale?: string
+  financingStage?: string
+  companyAddress?: string
+  recruitmentStatus?: string
+  companyIntroduce?: string
+  discoveredAt?: string
 }
 
 type Paged = { items: JobRow[]; total: number; page: number; size: number }
@@ -89,6 +106,10 @@ export default function DataPage() {
   const [stats, setStats] = useState<Stats>({})
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  /** 正在查看详情的那条记录；null = 弹窗关闭 */
+  const [detail, setDetail] = useState<JobRow | null>(null)
+  /** 「在浏览器中打开」的提示（成功/失败都显示在详情弹窗里） */
+  const [openMsg, setOpenMsg] = useState('')
   /** 手动触发重查用的计数器（点「查询」「重置」时 +1）。
    *  不能只靠 setPage(1)：页码本来就是 1 时它不变化，effect 不会重跑。 */
   const [refreshKey, setRefreshKey] = useState(0)
@@ -205,6 +226,37 @@ export default function DataPage() {
 
   function toggleStatus(s: string) {
     setStatuses((prev) => (prev.includes(s) ? prev.filter((v) => v !== s) : [...prev, s]))
+  }
+
+  /** 打开详情弹窗（顺便清掉上一条留下的"打开页面"提示） */
+  function openDetail(row: JobRow) {
+    setDetail(row)
+    setOpenMsg('')
+  }
+
+  /**
+   * 让**自动化浏览器**打开这个岗位（它带着登录态）。
+   *
+   * 管理页所在的浏览器是用户自己的，没有自动化 profile 的登录态 ——
+   * 用它打开详情只会看到登录页，所以这个动作必须走后端、在平台自己的浏览器里开。
+   */
+  async function openInBrowser(url?: string) {
+    if (!url) return
+    setOpenMsg('正在打开…')
+    try {
+      const res = await fetch(`${API_BASE}/api/platforms/${selected}/open-page`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+      const body = await res.json().catch(() => null)
+      if (!res.ok || body?.success === false) {
+        throw new Error(body?.message || `HTTP ${res.status}`)
+      }
+      setOpenMsg('已用自动化浏览器打开 —— 请切到那个浏览器窗口查看（只有它是登录状态）')
+    } catch (e) {
+      setOpenMsg(`打开失败：${(e as Error).message}`)
+    }
   }
 
   const totalPages = Math.max(1, Math.ceil((data.total || 0) / (pageSize || 20)))
@@ -341,7 +393,7 @@ export default function DataPage() {
       </div>
 
       <div className="overflow-x-auto border border-gray-200">
-        <table className="w-full min-w-[1100px] text-left">
+        <table className="w-full min-w-[900px] text-left">
           <thead className="border-b border-gray-300 bg-gray-50">
             <tr className="text-xs text-gray-600">
               <Th pad={pad}>岗位</Th>
@@ -350,16 +402,15 @@ export default function DataPage() {
               <Th pad={pad}>城市</Th>
               <Th pad={pad}>经验</Th>
               <Th pad={pad}>学历</Th>
-              <Th pad={pad}>HR</Th>
-              <Th pad={pad}>HR活跃</Th>
               <Th pad={pad}>状态</Th>
               <Th pad={pad}>备注</Th>
+              <Th pad={pad}>操作</Th>
             </tr>
           </thead>
           <tbody>
             {data.items.length === 0 && !loading ? (
               <tr>
-                <td className="px-2 py-4 text-gray-500" colSpan={10}>
+                <td className="px-2 py-4 text-gray-500" colSpan={9}>
                   (没有符合条件的记录)
                 </td>
               </tr>
@@ -367,13 +418,9 @@ export default function DataPage() {
               data.items.map((row, idx) => (
                 <tr key={row.id ?? idx} className="border-b border-gray-100 align-top">
                   <Td pad={pad}>
-                    {row.jobUrl ? (
-                      <a className="hover:underline" href={row.jobUrl} target="_blank" rel="noreferrer">
-                        {row.jobName || '(无)'}
-                      </a>
-                    ) : (
-                      row.jobName || '(无)'
-                    )}
+                    {/* 岗位名不再直接外链：管理页浏览器没有登录态，点了只会看到登录页。
+                        要看详情走「查看详情」，那里有在自动化浏览器打开的入口。 */}
+                    {row.jobName || '(无)'}
                   </Td>
                   <Td pad={pad}>{row.companyName || ''}</Td>
                   <Td pad={pad}>{row.salary || ''}</Td>
@@ -381,21 +428,151 @@ export default function DataPage() {
                   <Td pad={pad}>{row.experience || ''}</Td>
                   <Td pad={pad}>{row.degree || ''}</Td>
                   <Td pad={pad}>
-                    {row.hrName || ''}
-                    {row.hrPosition ? <span className="text-gray-400"> · {row.hrPosition}</span> : null}
-                  </Td>
-                  <Td pad={pad}>{row.hrActiveStatus || ''}</Td>
-                  <Td pad={pad}>
                     <StatusTag status={row.status} />
                   </Td>
                   <Td pad={pad}>
                     <span className="text-xs text-gray-500">{row.note || ''}</span>
+                  </Td>
+                  <Td pad={pad}>
+                    <button
+                      className="whitespace-nowrap border border-gray-300 px-2 py-0.5 text-xs hover:border-gray-800"
+                      onClick={() => openDetail(row)}
+                    >
+                      查看详情
+                    </button>
                   </Td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* 详情弹窗 */}
+      {detail && (
+        <Modal title="岗位详情" onClose={() => setDetail(null)}>
+          <div className="max-h-[70vh] overflow-y-auto pr-1">
+            <div className="mb-3 border-b border-gray-200 pb-2">
+              <div className="text-base font-semibold">{detail.jobName || '(无岗位名)'}</div>
+              <div className="mt-0.5 text-sm text-gray-700">{detail.companyName || ''}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+                <span>{detail.salary || '薪资未知'}</span>
+                {detail.location && <span>{detail.location}</span>}
+                {detail.experience && <span>{detail.experience}</span>}
+                {detail.degree && <span>{detail.degree}</span>}
+                <StatusTag status={detail.status} />
+              </div>
+            </div>
+
+            {/* 打开原页面：必须用自动化浏览器，管理页这个浏览器没有登录态 */}
+            <div className="mb-3 border border-gray-200 bg-gray-50 p-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="border border-gray-800 bg-gray-900 px-3 py-1 text-xs text-white disabled:opacity-40"
+                  disabled={!detail.jobUrl}
+                  onClick={() => void openInBrowser(detail.jobUrl)}
+                >
+                  在自动化浏览器中打开
+                </button>
+                {!detail.jobUrl && <span className="text-xs text-gray-500">这条记录没有留存岗位链接</span>}
+              </div>
+              <div className="mt-1 text-xs text-gray-500">
+                会用<b>自动化那个浏览器</b>（就是投递时用的、带登录态的那个）打开，
+                不是你现在看管理页的这个 —— 当前这个没登录，打开也只会跳到登录页。
+              </div>
+              {openMsg && <div className="mt-1 text-xs text-gray-700">{openMsg}</div>}
+            </div>
+
+            <div className="mb-3">
+              <div className="mb-1 text-xs font-semibold text-gray-600">HR</div>
+              <div className="text-xs text-gray-700">
+                {detail.hrName || '(未知)'}
+                {detail.hrPosition ? ` · ${detail.hrPosition}` : ''}
+                {detail.hrActiveStatus ? ` · ${detail.hrActiveStatus}` : ''}
+              </div>
+            </div>
+
+            <DetailSection title="公司信息">
+              <DetailRow label="行业" value={detail.industry} />
+              <DetailRow label="规模" value={detail.companyScale} />
+              <DetailRow label="融资阶段" value={detail.financingStage} />
+              <DetailRow label="地址" value={detail.companyAddress} />
+              <DetailRow label="招聘状态" value={detail.recruitmentStatus} />
+              <DetailRow label="入库时间" value={detail.discoveredAt} />
+            </DetailSection>
+
+            {detail.note && (
+              <div className="mb-3">
+                <div className="mb-1 text-xs font-semibold text-gray-600">过滤/提示备注</div>
+                <div className="text-xs text-gray-700">{detail.note}</div>
+              </div>
+            )}
+
+            <div className="mb-3">
+              <div className="mb-1 text-xs font-semibold text-gray-600">岗位描述（JD）</div>
+              <div className="whitespace-pre-wrap border border-gray-200 bg-white p-2 text-xs leading-relaxed text-gray-800">
+                {detail.jdText || '(没有留存 JD 正文)'}
+              </div>
+            </div>
+
+            {detail.companyIntroduce && (
+              <div>
+                <div className="mb-1 text-xs font-semibold text-gray-600">公司介绍</div>
+                <div className="whitespace-pre-wrap border border-gray-200 bg-white p-2 text-xs leading-relaxed text-gray-800">
+                  {detail.companyIntroduce}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-3 flex justify-end">
+            <button className="border border-gray-300 px-3 py-1 text-xs hover:border-gray-800" onClick={() => setDetail(null)}>
+              关闭
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+/** 详情里的一组字段 */
+function DetailSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-3">
+      <div className="mb-1 text-xs font-semibold text-gray-600">{title}</div>
+      <div className="border border-gray-200">
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/** 详情里的一行「标签：值」；值为空时显示 - */
+function DetailRow({ label, value }: { label: string; value?: string }) {
+  return (
+    <div className="flex border-b border-gray-100 px-2 py-1 text-xs last:border-b-0">
+      <span className="w-20 shrink-0 text-gray-500">{label}</span>
+      <span className="flex-1 text-gray-800">{value || '-'}</span>
+    </div>
+  )
+}
+
+/** 极简弹窗：点遮罩或按 Esc 关闭 */
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-16" onClick={onClose}>
+      <div className="w-[46rem] border border-gray-800 bg-white p-4" onClick={(e) => e.stopPropagation()}>
+        <h3 className="mb-3 border-b border-gray-300 pb-1 text-sm font-semibold">{title}</h3>
+        {children}
       </div>
     </div>
   )

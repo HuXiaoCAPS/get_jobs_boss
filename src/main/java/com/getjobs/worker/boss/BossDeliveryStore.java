@@ -279,6 +279,18 @@ public class BossDeliveryStore implements DeliveryStore {
         r.status = e.getDeliveryStatus();
         r.note = e.getFilterNote();
         r.jobUrl = e.getJobUrl();
+        // 详情字段：列表页不展示，但"点详情"要立刻能看到，所以随列表一起带回来。
+        // 体量可控（JD 几 KB，一页 20 条），省掉一次额外的往返请求。
+        r.jdText = e.getJobDescription();
+        r.industry = e.getIndustry();
+        r.companyScale = e.getCompanyScale();
+        r.financingStage = e.getFinancingStage();
+        r.companyAddress = e.getCompanyAddress();
+        r.recruitmentStatus = e.getRecruitmentStatus();
+        r.companyIntroduce = e.getIntroduce();
+        r.discoveredAt = e.getCreatedAt() == null
+                ? null
+                : e.getCreatedAt().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
         return r;
     }
 

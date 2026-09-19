@@ -72,7 +72,7 @@ export default function Toolbar() {
 
   return (
     <header className="sticky top-0 z-50 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-blacksection">
-      <div className="mx-auto flex w-full max-w-6xl items-center gap-6 px-6 py-3">
+      <div className="mx-auto flex w-full max-w-[1600px] items-center gap-6 px-6 py-3">
         <Link href="/boss" className="flex items-center gap-2 text-base font-semibold">
           <span>🍀</span>
           <span>Get Jobs</span>

@@ -50,4 +50,32 @@ public class JobRecord {
 
     /** 岗位详情页地址 */
     public String jobUrl;
+
+    // ------------------------------------------------------------------
+    // 详情字段（列表页不展示，点「详情」才看）
+    // ------------------------------------------------------------------
+
+    /** 岗位描述（JD）正文 */
+    public String jdText;
+
+    /** 公司行业 */
+    public String industry;
+
+    /** 公司规模（如 {@code 1000-9999人}） */
+    public String companyScale;
+
+    /** 融资阶段（如 {@code 已上市} / {@code B轮}） */
+    public String financingStage;
+
+    /** 公司地址 */
+    public String companyAddress;
+
+    /** 招聘状态原文（如 {@code 招聘中}） */
+    public String recruitmentStatus;
+
+    /** 公司介绍 */
+    public String companyIntroduce;
+
+    /** 入库时间（{@code yyyy-MM-dd HH:mm}，没有就 null） */
+    public String discoveredAt;
 }

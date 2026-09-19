@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -199,6 +200,46 @@ public class PlatformController {
             return unsupported(id, "查看岗位数据");
         }
         return ok(result);
+    }
+
+    /**
+     * 用<b>该平台的浏览器</b>打开一个地址（body: {@code {"url": "https://..."}}）。
+     *
+     * <p>存在的理由：管理页是用户自己的浏览器，那里没有自动化 profile 的登录态，
+     * 点开岗位详情只会看到登录页。而平台自己的浏览器（Boss 是持久化 profile）带着登录态。
+     *
+     * <p>两道安全约束：{@code JobPlatform#openInBrowser} 的实现方必须自己校验域名
+     * （Boss 只认 zhipin.com）；这里也顺带挡掉非 http(s) 的输入。
+     *
+     * @return 打开成功 200；平台不存在 404；其余（不支持 / 地址被拒 / 浏览器正忙）一律 400，
+     *         具体原因看后端日志 —— 接口层区分不了，也不该猜
+     */
+    @PostMapping("/{id}/open-page")
+    public ResponseEntity<Map<String, Object>> openPage(@PathVariable("id") String id,
+                                                       @RequestBody(required = false) Map<String, String> body) {
+        String url = body == null ? null : body.get("url");
+        if (url == null || url.isBlank()) {
+            return badRequest("缺少 url 字段");
+        }
+        JobPlatform platform = platformRegistry.find(id).orElse(null);
+        if (platform == null) {
+            return notFound(id);
+        }
+        boolean opened = platform.openInBrowser(url.trim());
+        if (opened) {
+            return ok(Map.of("url", url.trim()));
+        }
+        // 没打开有两种原因（不支持 / 地址不合法），平台自己知道是哪种，
+        // 但接口层区分不了 —— 统一提示，并把线索写进日志（平台侧已有 log.warn）。
+        return badRequest("平台 " + id + " 未打开该地址（可能是不支持在浏览器中打开，或该地址不属于本平台）");
+    }
+
+    /** 打开失败时的回应（见 {@link #openPage} 的说明：区分不了原因，所以统一 400） */
+    private static ResponseEntity<Map<String, Object>> badRequest(String message) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", false);
+        result.put("message", message);
+        return ResponseEntity.badRequest().body(result);
     }
 
     // ------------------------------------------------------------------

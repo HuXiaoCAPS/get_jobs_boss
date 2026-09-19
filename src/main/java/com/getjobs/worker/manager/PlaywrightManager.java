@@ -851,6 +851,67 @@ public class PlaywrightManager {
     }
 
     /**
+     * 在自动化浏览器里<b>新开一个标签页</b>打开指定地址，并把它带到前台。
+     *
+     * <p>存在的理由：管理页是用户自己的浏览器，那里<b>没有</b>自动化 profile 的登录态；
+     * 点开一个需要登录才能看的页面（岗位详情之类）只会跳到登录页。
+     * 而自动化浏览器用的是持久化 profile（{@code browser-data/}），登录态在里面 ——
+     * 所以要让用户看到"已登录的"页面，只能在这里开。
+     *
+     * <p>三个刻意的约束：
+     * <ul>
+     *   <li><b>投递进行中不打扰</b>：{@link #isPlaywrightBusy()} 为真时直接拒绝，
+     *       免得新开的页面打断正在跑的流程（两者共用同一个 context）；</li>
+     *   <li><b>不改动 bossPage</b>：新开页面而不是在当前页导航，
+     *       否则用户一点"打开"就把后台那个业务页顶掉了；</li>
+     *   <li><b>地址合法性由调用方校验</b>：这里只认 http/https，
+     *       具体允许哪些域名属于平台知识（见 {@code JobPlatform#openInBrowser}）。</li>
+     * </ul>
+     *
+     * @return 是否成功打开
+     */
+    public boolean openNewPage(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        String trimmed = url.trim();
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+            log.warn("拒绝打开非 http(s) 地址：{}", trimmed);
+            return false;
+        }
+        if (isPlaywrightBusy()) {
+            log.warn("Playwright 正在执行别的任务，暂不开新页面：{}", trimmed);
+            return false;
+        }
+        try {
+            ensureReady();
+        } catch (Exception e) {
+            log.warn("浏览器不可用，无法打开页面：{}", e.getMessage());
+            return false;
+        }
+        return callOnPlaywright(() -> {
+            try {
+                Page page = context.newPage();
+                page.setDefaultTimeout(DEFAULT_TIMEOUT);
+                page.navigate(trimmed, new Page.NavigateOptions()
+                        .setTimeout(DEFAULT_TIMEOUT)
+                        .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+                // 带到前台，否则用户还得自己去一堆标签里找
+                try {
+                    page.bringToFront();
+                } catch (Exception ignore) {
+                    // 某些环境下不支持，不影响页面已经打开
+                }
+                log.info("已在自动化浏览器中打开：{}", trimmed);
+                return true;
+            } catch (Exception e) {
+                log.warn("打开页面失败（{}）：{}", trimmed, e.getMessage());
+                return false;
+            }
+        });
+    }
+
+    /**
      * 注册登录状态监听器
      *
      * @param listener 监听器
